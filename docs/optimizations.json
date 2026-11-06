@@ -1886,6 +1886,17 @@
   },
   {
     "engine": "minimax",
+    "name": "MSA prefill mode 8",
+    "flag_or_env": "STRIX_MM_PF_MSA_REWORK",
+    "default": "8",
+    "exact": "Exact: every partial, score, index and output byte of modes 0..9 in the fused MSA suite (whole tiles, quad-boundary ties, all -inf K tiles); result hash identical on both ranks in a 7-vs-8 PAIR A/B.",
+    "gain": "TTFT in-process A/B vs mode 7 8K -2.6 %, 16K -0.5 %; 32K fresh process 8/7/8 + 7/8/7 -2.6 % (-1.67 s), result hash identical on both ranks",
+    "preconditions": "Supported MSA prefill shapes.",
+    "off_switch": "STRIX_MM_PF_MSA_REWORK=7 (previous default), =6, =5, =3, =0",
+    "doc_anchor": "docs/optimizations.md#mm-pf-msa-mode8"
+  },
+  {
+    "engine": "minimax",
     "name": "GPU-gated prefill exchange in the rank app",
     "flag_or_env": "STRIX_MM_PFX",
     "default": "on",

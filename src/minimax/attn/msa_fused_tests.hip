@@ -726,13 +726,47 @@ void report_r16_reuse(std::uint64_t pos0, unsigned n, unsigned cap, unsigned pvf
 }
 
 // Random finite initial cache bits include stale future slots, restored before every arm.
-void prefill_batch_case(std::uint32_t pos0, std::uint32_t n, std::mt19937& rng, bool ties = false, bool quick = false) {
+// special: K rows with NaN / +inf / -0 / denormal dims (the tile-max tree gate); modes 6..9 only, against mode 6.
+void prefill_batch_case(std::uint32_t pos0, std::uint32_t n, std::mt19937& rng, bool ties = false, bool quick = false,
+                        bool special = false) {
     Prefill p = make_prefill(std::uint64_t{pos0} + n, rng);
     if (ties) hip_ok(hipMemset(p.diq, 0, p.iq.size() * sizeof(float)), "tied index queries");
     const std::size_t nkv = p.T * 256, nik = p.T * 128;
     std::vector<std::uint16_t> initial_k(nkv), initial_v(nkv), initial_i(nik);
     for (auto* vec : {&initial_k, &initial_v, &initial_i})
         for (auto& x : *vec) x = static_cast<std::uint16_t>(0x3e00U + (rng() & 0x3ffU));
+    if (special) {
+        quick = true;
+        for (std::size_t row = 0; row < p.T * 2; ++row) {
+            const std::size_t pick = row % 53;
+            const std::uint16_t bits = pick == 3 ? 0x7fc0U : pick == 11 ? 0x7f80U : pick == 19 ? 0x8000U : pick == 29 ? 0x8001U : 0U;
+            if (bits == 0U) continue;
+            for (std::size_t d = 0; d < 128; ++d) initial_k[row * 128 + d] = bits;
+            if (pick == 29) for (std::size_t d = 0; d < 128; d += 2) initial_k[row * 128 + d] = 0x0001U;  // mixed-sign denormals
+        }
+        // Whole 16-key tiles (block-aligned): positions 256..271 mod 512 all NaN, 272..287 all +0 (every score ties
+        // at +0 across quads and tree levels), 288..303 one repeated row (equal maxima in every lane).
+        // Quad-boundary ties: 304..319 hold row R at tile lanes 3, 4, 7, 8 and -R elsewhere, 320..335 the
+        // reverse, so for every query one of the two tiles has its maximum tied across the 3|4 and 7|8 quad
+        // boundaries. 336..351 all -inf K.
+        for (std::size_t pos = 0; pos < p.T; ++pos) {
+            const std::size_t at = pos % 512;
+            if (at < 256 || at >= 352) continue;
+            const std::size_t lane = at % 16;
+            const bool tie = lane == 3 || lane == 4 || lane == 7 || lane == 8;
+            for (std::size_t g = 0; g < 2; ++g)
+                for (std::size_t d = 0; d < 128; ++d) {
+                    std::uint16_t& x = initial_k[(pos * 2 + g) * 128 + d];
+                    const std::uint16_t r = initial_k[((pos - at) * 2 + g) * 128 + d];  // block start row, untouched
+                    x = at < 272   ? std::uint16_t{0x7fc0U}
+                        : at < 288 ? std::uint16_t{0U}
+                        : at < 304 ? initial_k[((pos - (at - 288)) * 2 + g) * 128 + d]
+                        : at < 320 ? static_cast<std::uint16_t>(tie ? r : r ^ 0x8000U)
+                        : at < 336 ? static_cast<std::uint16_t>(tie ? r ^ 0x8000U : r)
+                                   : std::uint16_t{0xff80U};
+                }
+        }
+    }
     const unsigned windows = (n + 15) / 16;
     const unsigned max_scratch = static_cast<unsigned>((512ULL * 1024 * 1024) / mf::prefill_window_bytes(p.max_blocks));
     const unsigned scratch_windows = std::min(windows, max_scratch);
@@ -778,7 +812,7 @@ void prefill_batch_case(std::uint32_t pos0, std::uint32_t n, std::mt19937& rng, 
             std::vector<float> score_ref, partial_ref, batch_output_ref;
             std::vector<std::uint32_t> idx_ref, count_ref;
             for (unsigned query_rows : {0U, 16U, 32U, 64U}) {
-                for (unsigned rework : {0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U}) {
+                for (unsigned rework : {0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U, 8U, 9U}) {
                     reset();
                     auto v = prefill_view(p, pos0, std::min(n, 16U), ver, ver == 4 ? 2U : 0U);
                     v.scores = scores;
@@ -842,7 +876,7 @@ void prefill_batch_case(std::uint32_t pos0, std::uint32_t n, std::mt19937& rng, 
                                                                : std::vector<unsigned>{1U, scratch_windows};
     for (unsigned cap : producer_caps) for (unsigned pvf : {0U, 1U}) {
         const std::size_t batch_rows = std::size_t{cap} * 16;
-        float producer_ms[8] = {}, complete_ms[8] = {};
+        float producer_ms[10] = {}, complete_ms[10] = {};
         float selection_ms = 0.0F;
         std::uint64_t partial_count = 0;
         for (unsigned r0 = 0; r0 < n; r0 += cap * 16) {
@@ -852,7 +886,9 @@ void prefill_batch_case(std::uint32_t pos0, std::uint32_t n, std::mt19937& rng, 
             std::vector<float> score_ref, partial_ref, output_ref;
             std::vector<std::uint32_t> ids_ref, counts_ref;
             std::vector<std::uint16_t> k_ref, v_ref, ik_ref;
-            for (unsigned mode : {0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U}) {
+            const std::vector<unsigned> modes = special ? std::vector<unsigned>{6U, 7U, 8U, 9U}
+                                                        : std::vector<unsigned>{0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U, 8U, 9U};
+            for (unsigned mode : modes) {
                 hip_ok(hipMemset(scores, 0xa5, batch_rows * 2 * p.max_blocks * sizeof(float)), "producer scores sentinel");
                 hip_ok(hipMemset(partial, 0xa5, batch_rows * 32 * msa::kMaxChunks * 130 * sizeof(float)), "producer partial sentinel");
                 hip_ok(hipMemset(idx, 0xa5, batch_rows * 2 * msa::kTopK * sizeof(std::uint32_t)), "producer ids sentinel");
@@ -865,7 +901,7 @@ void prefill_batch_case(std::uint32_t pos0, std::uint32_t n, std::mt19937& rng, 
                 const auto pt = host(partial, batch_rows * 32 * msa::kMaxChunks * 130);
                 const auto ids = host(idx, batch_rows * 2 * msa::kTopK), counts = host(cnt, batch_rows * 2);
                 const auto output = host(v.o, std::size_t{m} * 32 * 128);
-                if (mode == 0) {
+                if (mode == modes.front()) {
                     score_ref = sc; partial_ref = pt; ids_ref = ids; counts_ref = counts; output_ref = output;
                     k_ref = host(p.kc, nkv); v_ref = host(p.vc, nkv); ik_ref = host(p.ikc, nik);
                     report_r16_reuse(std::uint64_t{pos0} + r0, m, cap, pvf, ids, counts);
@@ -905,8 +941,11 @@ void prefill_batch_case(std::uint32_t pos0, std::uint32_t n, std::mt19937& rng, 
                     1e6 * producer_ms[4] / static_cast<double>(partial_count),
                     1e6 * producer_ms[5] / static_cast<double>(partial_count),
                     1e6 * producer_ms[6] / static_cast<double>(partial_count));
-        std::printf("prefill complete pos0=%u n=%u scratch=%u pv_full=%u modes 0/1/2/3/4/5/6/7 %.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f ms; shared-selection scheduling %.3f ms (R16 membership included in producers)\n",
-                    pos0, n, cap, pvf, complete_ms[0], complete_ms[1], complete_ms[2], complete_ms[3], complete_ms[4], complete_ms[5], complete_ms[6], complete_ms[7], selection_ms);
+        std::printf("prefill complete pos0=%u n=%u scratch=%u pv_full=%u modes 0/1/2/3/4/5/6/7/8/9 %.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f ms; shared-selection scheduling %.3f ms (R16 membership included in producers)%s\n",
+                    pos0, n, cap, pvf, complete_ms[0], complete_ms[1], complete_ms[2], complete_ms[3], complete_ms[4], complete_ms[5], complete_ms[6], complete_ms[7], complete_ms[8], complete_ms[9], selection_ms,
+                    special ? " special K rows, modes 6..9 bitwise vs 6" : "");
+        std::printf("prefill producer tree pos0=%u n=%u scratch=%u pv_full=%u modes 6/8/9 %.3f/%.3f/%.3f ms (no combine)\n",
+                    pos0, n, cap, pvf, producer_ms[6], producer_ms[8], producer_ms[9]);
     }
     // Index gates also run in quick mode. Compare default, Q32 and real Q64 in
     // each reused scratch batch, including causal holes and unused tail rows.
@@ -987,13 +1026,13 @@ void prefill_batch_case(std::uint32_t pos0, std::uint32_t n, std::mt19937& rng, 
     catch (const std::invalid_argument&) { rejected = true; }
     check(rejected, "batched prefill rejects unsupported index rows");
     invalid.index_rows = 32;
-    invalid.msa_rework = 8;
+    invalid.msa_rework = 10;
     rejected = false;
     try { mf::enqueue_prefill(invalid, nullptr); }
     catch (const std::invalid_argument&) { rejected = true; }
     check(rejected, "batched prefill rejects unsupported rework mode");
     auto invalid_producer = mf::PrefillView{prefill_view(p, pos0, std::min(n, 16U), 4, 2),
-                                          std::min(n, 16U), pos0, 1, 0, false, 32, 8};
+                                          std::min(n, 16U), pos0, 1, 0, false, 32, 10};
     rejected = false;
     try { mf::enqueue_prefill_partials(invalid_producer, nullptr); }
     catch (const std::invalid_argument&) { rejected = true; }
@@ -1006,6 +1045,7 @@ void prefill_batch_case(std::uint32_t pos0, std::uint32_t n, std::mt19937& rng, 
 }
 
 void prefill_batch_cases(std::mt19937& rng) {
+    for (std::uint32_t pos0 : {0U, 2047U, 4096U, 30000U}) prefill_batch_case(pos0, 129, rng, false, true, true);
     for (std::uint32_t pos0 : {2047U, 2048U, 2049U}) prefill_batch_case(pos0, 65, rng, true);
     for (std::uint32_t pos0 : {0U, 1000U, 2040U, 4096U, 8190U, 30000U})
         for (std::uint32_t n : {1U, 15U, 16U, 17U, 63U, 64U, 65U, 100U, 127U, 128U, 129U, 1024U, 4096U}) prefill_batch_case(pos0, n, rng);
@@ -1533,6 +1573,7 @@ int main() {
         // Mandatory real four-subtile Q64 + tail, even with a custom case list.
         // Cross the dense boundary and exercise equal scores/ID tie-breaking.
         for (unsigned pos0 : {2047U, 2048U, 2049U}) prefill_batch_case(pos0, 65, rng, true, true);
+        for (unsigned pos0 : {0U, 2047U, 4096U, 30000U}) prefill_batch_case(pos0, 129, rng, false, true, true);
         std::printf("strix-mmattn-fused-tests: quick producer/index cases, %d failure(s)\n", g_fail);
         return g_fail != 0 ? 1 : 0;
     }

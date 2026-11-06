@@ -832,6 +832,32 @@ __device__ __forceinline__ float swz_xor(float v, int d) {
 __device__ __forceinline__ float rl(float v, int lane) {
     return u2f(static_cast<std::uint32_t>(__builtin_amdgcn_readlane(static_cast<int>(f2u(v)), lane)));
 }
+// E4 tile max (modes 8/9): lane l ^ d by ds_swizzle (TREE 1) or DPP row_xmask / permlanex16 (TREE 2).
+template <unsigned TREE, int D>
+__device__ __forceinline__ float xor_lane(float v) {
+    if constexpr (TREE == 1) {
+        return swz_xor(v, D);
+    } else if constexpr (D == 16) {
+        return u2f(static_cast<std::uint32_t>(__builtin_amdgcn_permlanex16(f2u(v), f2u(v), 0x76543210U, 0xfedcba98U, false, false)));
+    } else {
+        return u2f(static_cast<std::uint32_t>(__builtin_amdgcn_update_dpp(0, static_cast<int>(f2u(v)), 0x160 + D, 0xF, 0xF, false)));
+    }
+}
+// Bitwise equal to the ordered chain tm = max_of(tm, s_j), j = 0..15 from -inf, over the STREAM tile scores
+// (keys >= nt already hold -inf). Key bits 0/1/2 sit on lane bits 2/3/4 and every lane of a quad holds the same
+// score, so lane 0 always keeps the lower key range on the left: the tree returns the leftmost maximum, as the
+// chain does (only +0/-0 ties differ in bits). NaN scores, which the chain never selects, become -inf leaves.
+template <unsigned TREE>
+__device__ __forceinline__ float tile_max_tree(float sa, float sb) {
+    float a = sa != sa ? -__builtin_inff() : sa, b = sb != sb ? -__builtin_inff() : sb;
+    a = max_of(a, xor_lane<TREE, 4>(a));
+    b = max_of(b, xor_lane<TREE, 4>(b));
+    a = max_of(a, xor_lane<TREE, 8>(a));
+    b = max_of(b, xor_lane<TREE, 8>(b));
+    a = max_of(a, xor_lane<TREE, 16>(a));
+    b = max_of(b, xor_lane<TREE, 16>(b));
+    return rl(max_of(a, b), 0);
+}
 // Lane holding key kk (0..7) of a group of 8 after the transposed butterfly.
 __host__ __device__ constexpr int key_lane(unsigned kk) {
     return static_cast<int>(((kk >> 2U) & 1U) * 16U + ((kk >> 1U) & 1U) * 8U + (kk & 1U) * 4U);
@@ -1254,9 +1280,10 @@ __global__ __launch_bounds__(256) void prefill_combine_kernel(PrefillView p) {
 }
 
 template <unsigned HPW, bool DENSE, class View = DecodeView, bool SEPARATE = false, bool STREAM = false, bool COMPACT = SEPARATE, bool PACKED = false,
-          bool CORRPACK = false, bool TAIL = !SEPARATE>
+          bool CORRPACK = false, bool TAIL = !SEPARATE, unsigned TREE = 0>
 __global__ __launch_bounds__(kGroup / HPW * 32) void attend4_kernel(View input, int select) {
     constexpr bool REPAIR = repaired_prefill<View>;
+    static_assert(TREE == 0 || STREAM);  // the tree relies on STREAM's -inf scores for keys >= nt
     static_assert(!PACKED || (HPW == 2 && REPAIR && SEPARATE && STREAM && COMPACT));
     static_assert(!CORRPACK || PACKED);
     unsigned window = blockIdx.z, row_group = blockIdx.x, chunk = blockIdx.y;
@@ -1477,9 +1504,13 @@ __global__ __launch_bounds__(kGroup / HPW * 32) void attend4_kernel(View input, 
             for (unsigned h = 0; h < HPW; ++h) {
                 const float sa = sv[h][0], sb = sv[h][1];
                 float tm = -__builtin_inff();
+                if constexpr (TREE != 0) {
+                    tm = tile_max_tree<TREE>(sa, sb);
+                } else {
 #pragma unroll
-                for (unsigned j = 0; j < kTile; ++j)
-                    if (NTC != 0 || j < nt) tm = max_of(tm, rl(j < 8 ? sa : sb, key_lane(j % 8)));
+                    for (unsigned j = 0; j < kTile; ++j)
+                        if (NTC != 0 || j < nt) tm = max_of(tm, rl(j < 8 ? sa : sb, key_lane(j % 8)));
+                }
                 const float mn = max_of(m[h], tm);
                 mprev[h] = m[h];
                 if constexpr (!CORRPACK) {
@@ -1942,6 +1973,20 @@ template <bool DENSE> void launch_prefill_attend(const PrefillView& p, unsigned 
         }
         const auto chunks = prefill_chunk_prefix(p.pos0 + scheduled.rows) -
                             prefill_chunk_prefix(p.pos0 + p.first_window * kMaxRows);
+        if (p.msa_rework == 8 || p.msa_rework == 9) {
+            // Mode 7 with the 16-key tile max as an exact lane tree (8: ds_swizzle, 9: DPP/permlanex16).
+            const RepairedPrefillView repaired{scheduled};
+            if (p.msa_rework == 8)
+                hipLaunchKernelGGL((attend4_kernel<2, DENSE, RepairedPrefillView, true, true, true, true, true, true, 1>),
+                                   dim3(static_cast<unsigned>(chunks * v.kv_heads)), dim3(256),
+                                   4 * kTile * kHeadDim * sizeof(std::uint16_t), stream, repaired, 0);
+            else
+                hipLaunchKernelGGL((attend4_kernel<2, DENSE, RepairedPrefillView, true, true, true, true, true, true, 2>),
+                                   dim3(static_cast<unsigned>(chunks * v.kv_heads)), dim3(256),
+                                   4 * kTile * kHeadDim * sizeof(std::uint16_t), stream, repaired, 0);
+            check(hipGetLastError(), "minimax prefill fused tree partial producers");
+            return;
+        }
         if (p.msa_rework == 7) {
             // Mode 6 producer with the ticket combine fused into the last chunk block of each (row, group):
             // same partials, same combine expressions and ascending chunk order, no separate combine launch.
@@ -2020,6 +2065,16 @@ template <bool DENSE> void launch_prefill_partials(const PrefillView& p, unsigne
         const unsigned blocks = static_cast<unsigned>(block_count(p.pos0 + p.rows));
         hipLaunchKernelGGL((prefill_r16_kernel<DENSE>), dim3(blocks, v.kv_heads, windows), dim3(1024),
                            4 * kTile * kHeadDim * sizeof(std::uint16_t), stream, p);
+    } else if (p.msa_rework == 8 || p.msa_rework == 9) {  // diagnostic: modes 8/9 = mode 6 producer with the tree max
+        const RepairedPrefillView repaired{p};
+        if (p.msa_rework == 8)
+            hipLaunchKernelGGL((attend4_kernel<2, DENSE, RepairedPrefillView, true, true, true, true, true, false, 1>),
+                               dim3(static_cast<unsigned>(chunks * v.kv_heads)), dim3(256),
+                               4 * kTile * kHeadDim * sizeof(std::uint16_t), stream, repaired, 0);
+        else
+            hipLaunchKernelGGL((attend4_kernel<2, DENSE, RepairedPrefillView, true, true, true, true, true, false, 2>),
+                               dim3(static_cast<unsigned>(chunks * v.kv_heads)), dim3(256),
+                               4 * kTile * kHeadDim * sizeof(std::uint16_t), stream, repaired, 0);
     } else if (p.msa_rework == 6 || p.msa_rework == 7) {  // diagnostic: mode 7 = mode 6 producer (no tickets here)
         const RepairedPrefillView repaired{p};
         hipLaunchKernelGGL((attend4_kernel<2, DENSE, RepairedPrefillView, true, true, true, true, true>),
@@ -2048,7 +2103,7 @@ namespace {
 void validate_prefill_diagnostic(const PrefillView& p) {
     const DecodeView& v = p.window;
     const unsigned windows = p.rows == 0 ? 0 : (p.rows - 1) / kMaxRows + 1;
-    if (p.msa_rework > 7 || windows == 0 || windows > 65535U || p.first_window != 0 ||
+    if (p.msa_rework > 9 || windows == 0 || windows > 65535U || p.first_window != 0 ||
         p.scratch_windows == 0 || windows > p.scratch_windows ||
         v.rows_per_seq != (p.rows < kMaxRows ? p.rows : kMaxRows) || v.seqs != 1 ||
         v.q_heads != 32 || v.kv_heads != 2 || v.max_blocks == 0 || v.max_blocks > kMaxBlocks ||
@@ -2132,7 +2187,7 @@ void enqueue_prefill_index(const PrefillView& p, hipStream_t stream) {
 
 void enqueue_prefill(const PrefillView& p, hipStream_t stream, PrefillStageMarker marker, void* user) {
     const DecodeView& v = p.window;
-    if (p.msa_rework > 7 || (p.index_rows != 16 && p.index_rows != 32 && p.index_rows != 64) ||
+    if (p.msa_rework > 9 || (p.index_rows != 16 && p.index_rows != 32 && p.index_rows != 64) ||
         p.rows == 0 || p.scratch_windows == 0 || p.first_window != 0 || v.seqs != 1 ||
         v.q_heads != 32 || v.kv_heads != 2 || v.idx_heads != 2 || v.shard_count != 1 || v.shard_rank != 0 ||
         v.max_blocks == 0 || v.max_blocks > kMaxBlocks || (attend_version(v) != 3 && attend_version(v) != 4) ||

@@ -2867,6 +2867,22 @@ Mode 6 writes per-chunk partials and combines them in a second launch; mode 7 ru
 - **Measured gain:** attend call -8.3 % at 28672 rows x 4096 keys (faster at every fixture shape); TTFT bracketed in-process A/B vs mode 6 8K -5.0 % (-0.78 s), 16K -3.0 % (-0.93 s); 32K fresh process 6/7/6 + 7/6/7 -2.4 % (-1.59 s), result hash identical on both ranks.
 - **Implementation / evidence:** [kernel](../src/minimax/attn/msa_fused.hip), [tests](../src/minimax/attn/msa_fused_tests.hip)
 
+<a id="mm-pf-msa-mode8"></a>
+
+### MSA prefill mode 8
+
+**Engine:** `minimax`. **Control:** `STRIX_MM_PF_MSA_REWORK`. **Default:** 8.
+
+Mode 7 reduces the 16-key tile maximum through LDS; mode 8 keeps everything else of mode 7 and computes that maximum as a ds_swizzle lane tree inside the wave. Max is exact and order-free, so every score, partial and output is the same bit pattern.
+
+- **Preconditions:** Supported MSA prefill shapes (as mode 7).
+- **Automatic selection:** Resolver supplies 8 only when unset; explicit values win.
+- **Fallback notice:** As mode 6.
+- **Exactness evidence:** Exact: the fused MSA unit suite compares every partial, score, index and output byte of modes 0..9 (both PV paths, dense and sparse, whole tiles, quad-boundary ties and all -inf K tiles); prefill result hash identical on both ranks in a 7-vs-8 PAIR A/B.
+- **Off switch:** STRIX_MM_PF_MSA_REWORK=7 (previous default), =6, =5, =3, =0 (original)
+- **Measured gain:** TTFT in-process A/B vs mode 7 8K -2.6 %, 16K -0.5 %; 32K fresh process 8/7/8 + 7/8/7 -2.6 % (-1.67 s), result hash identical on both ranks.
+- **Implementation / evidence:** [kernel](../src/minimax/attn/msa_fused.hip), [tests](../src/minimax/attn/msa_fused_tests.hip)
+
 <a id="mm-rank-pfx"></a>
 
 ### GPU-gated prefill exchange in the rank app

@@ -973,14 +973,14 @@ std::uint64_t ab_flag(mm::Engine& eng, const std::string& flag, const std::vecto
     unsigned rework_mode = 1U, rework_base = 0U;
     if (flag == "pfmsarework") {
         if (const char* mode = std::getenv("STRIX_MM_AB_REWORK")) {
-            if (std::string(mode) != "1" && std::string(mode) != "2" && std::string(mode) != "3" && std::string(mode) != "4" && std::string(mode) != "5" && std::string(mode) != "6" && std::string(mode) != "7")
-                throw std::invalid_argument("STRIX_MM_AB_REWORK must be 1, 2, 3, 4, 5, 6 or 7");
-            rework_mode = std::string(mode) == "7" ? 7U : std::string(mode) == "6" ? 6U : std::string(mode) == "5" ? 5U : std::string(mode) == "4" ? 4U : std::string(mode) == "3" ? 3U : std::string(mode) == "2" ? 2U : 1U;
+            if (std::string(mode).size() != 1 || mode[0] < '1' || mode[0] > '9')
+                throw std::invalid_argument("STRIX_MM_AB_REWORK must be 1..9");
+            rework_mode = std::string(mode) == "9" ? 9U : std::string(mode) == "8" ? 8U : std::string(mode) == "7" ? 7U : std::string(mode) == "6" ? 6U : std::string(mode) == "5" ? 5U : std::string(mode) == "4" ? 4U : std::string(mode) == "3" ? 3U : std::string(mode) == "2" ? 2U : 1U;
         }
         if (const char* base = std::getenv("STRIX_MM_AB_REWORK_BASE")) {
             const std::string mode = base;
-            if (mode != "0" && mode != "1" && mode != "2" && mode != "3" && mode != "4" && mode != "5" && mode != "6" && mode != "7")
-                throw std::invalid_argument("STRIX_MM_AB_REWORK_BASE must be 0, 1, 2, 3, 4, 5, 6 or 7");
+            if (mode.size() != 1 || mode[0] < '0' || mode[0] > '9')
+                throw std::invalid_argument("STRIX_MM_AB_REWORK_BASE must be 0..9");
             rework_base = static_cast<unsigned>(mode[0] - '0');
         }
         std::printf("pfmsarework modes A=%u B=%u\n", rework_base, rework_mode);
