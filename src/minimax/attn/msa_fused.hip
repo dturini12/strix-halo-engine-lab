@@ -227,7 +227,7 @@ __global__ __launch_bounds__(kIdxThreads) void prefill_prep_kernel(PrefillView p
     }
 }
 
-// SPLIT (decode, STRIX_MMATTN_INDEX_SPLIT, default ON): the grid is idx_heads copies of the item grid; copy h0 scores
+// SPLIT (decode, STRIX_MMATTN_INDEX_SPLIT=1, opt-in, default OFF): the grid is idx_heads copies of the item grid; copy h0 scores
 // only index head h0 of the same items. Per-head dot, wave max and in-order max over waves are unchanged, so every
 // score is bitwise the same; new index-key rows are stored to the cache by copy 0 only (all copies patch their tile).
 template <class View, bool SPLIT = false>
@@ -1869,7 +1869,8 @@ unsigned g_index_grid_cap = [] {
 unsigned index_grid_cap() { return g_index_grid_cap; }
 void set_index_grid_cap(unsigned cap) { g_index_grid_cap = cap > 0 ? cap : 1U; }
 namespace {
-// STRIX_MMATTN_INDEX_SPLIT=0: one block per item scores every index head (old launch). Read at the first decode index
+// STRIX_MMATTN_INDEX_SPLIT=1 (opt-in; absent or any other value keeps the old launch: one block per item scores every
+// index head). Read at the first decode index
 // launch (after the engine resolver exported defaults / baseline), not at load.
 // Atomic: decode launches may come from several host threads; racing first reads resolve the same env value.
 std::atomic<int> g_index_split{-1};
@@ -1879,7 +1880,7 @@ bool index_split() {
     if (on < 0) {
         const char* e = std::getenv("STRIX_MMATTN_INDEX_SPLIT");
         int expected = -1;
-        const int resolved = e == nullptr || std::strcmp(e, "0") != 0 ? 1 : 0;
+        const int resolved = e != nullptr && std::strcmp(e, "1") == 0 ? 1 : 0;
         on = g_index_split.compare_exchange_strong(expected, resolved, std::memory_order_relaxed) ? resolved : expected;
     }
     return on != 0;
