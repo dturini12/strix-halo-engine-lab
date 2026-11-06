@@ -1,0 +1,34 @@
+#pragma once
+
+#include <cstdint>
+#include <map>
+#include <string>
+#include <string_view>
+#include <variant>
+#include <vector>
+
+namespace strix::model_description {
+
+// Dependency-free TOML subset: bare/dotted keys, tables, inline tables, arrays,
+// single-line basic/literal strings, decimal int64/double and booleans. Unsupported
+// syntax is an error. Schema, required fields and model semantics belong to adapters.
+struct Value {
+    using Array = std::vector<Value>;
+    using Table = std::map<std::string, Value, std::less<>>;
+    using Data = std::variant<std::int64_t, double, bool, std::string, Array, Table>;
+    Data data;
+    friend bool operator==(const Value&, const Value&) = default;
+};
+
+struct ModelDescription {
+    Value::Table fields;
+    // Bare-key dotted path; nullptr for an absent path or a non-table parent.
+    [[nodiscard]] const Value* find(std::string_view path) const noexcept;
+};
+
+// Throws std::invalid_argument (with line/column) for malformed, duplicate or
+// unsupported input. load additionally throws std::runtime_error for I/O errors.
+[[nodiscard]] ModelDescription parse(std::string_view text);
+[[nodiscard]] ModelDescription load(const std::string& path);
+
+} // namespace strix::model_description

@@ -158,10 +158,11 @@ struct PrefillTimeline {
             double sum = 0;
             for (const double x : g) sum += x;
             const double mb = static_cast<double>(msg_bytes) / static_cast<double>(g.size()) / 1e6;
+            const double med = (g[(g.size() - 1) / 2] + g[g.size() / 2]) * 0.5;
             std::printf("pftimeline rank %u: exchanges %zu, %.1f MB each: exposed wait sum %.6f s, median %.3f ms, p90 %.3f ms, "
                         "max %.3f ms; bytes / median wait = %.2f GB/s per direction\n",
-                        rank, g.size(), mb, sum, g[g.size() / 2] * 1e3, g[g.size() * 9 / 10] * 1e3, g.back() * 1e3,
-                        mb / 1e3 / std::max(g[g.size() / 2], 1e-9));
+                        rank, g.size(), mb, sum, med * 1e3, g[g.size() * 9 / 10] * 1e3, g.back() * 1e3,
+                        mb / 1e3 / std::max(med, 1e-9));
         }
         std::printf("pftimeline rank %u: pipeline reuse-wait %.6f s | ordinary host reuse-wait %.6f s (grouped units only; worker time may overlap compute)\n",
                     rank, pipeline_reuse_wait, host_reuse_wait);

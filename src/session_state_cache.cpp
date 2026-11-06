@@ -102,6 +102,8 @@ static std::string numerical_config(std::string_view cli, const RotaryIdentity& 
         // Policy/provenance is metadata; applied arithmetic switches remain bound.
         if (value.starts_with("STRIX_QWEN_PROFILE_ALLOW_PENDING=") ||
             value.starts_with("STRIX_QWEN_PROFILE_OWNED_")) continue;
+        // Model-description admission is a refusal-only metadata check, never arithmetic.
+        if (value.starts_with("STRIX_QWEN_MODEL_DESCRIPTION")) continue;
         // Operational, per-process values: the GPU-turn wrapper's ids and the hash-cache directory.
         if (value.starts_with("STRIX_QPF2K_T16K=") || value.starts_with("STRIX_QPF2K_INDEX_BATCH=") ||
             value.starts_with("STRIX_EAGER_CODE_LOAD=") || value.starts_with("HIP_ENABLE_DEFERRED_LOADING=") ||

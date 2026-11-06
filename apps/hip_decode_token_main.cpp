@@ -3,6 +3,7 @@
 #include "http_slot_capacity.hpp"
 #include "strix/hip_mtp_native_validation.hpp"
 #include "qwen_prefill_plan.hpp"
+#include "qwen_model_description_hook.hpp"
 #include "qwen_yarn_registered_admission.hpp"
 #include "ple_resident_fallback.hpp"
 #include "qwen_http_memory.hpp"
@@ -1421,6 +1422,7 @@ static int run_decode_entry(
     const auto info =
         strix::gguf::read_file(
             options.model_path);
+    strix::qwen_description::refuse_unless_described(model, info);
     const auto manifest =
         strix::build_model_manifest(
             info);

@@ -1,4 +1,4 @@
-#include "gemma4/engine/profile.hpp"
+#include "strix/profiles/gemma4.hpp"
 #include "gemma4/exl3/format.hpp"
 
 #include <algorithm>

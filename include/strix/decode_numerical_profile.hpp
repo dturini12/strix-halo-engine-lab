@@ -1,5 +1,7 @@
 #pragma once
 
+#include "strix/fnv.hpp"
+
 #include <cstdint>
 #include <initializer_list>
 #include <optional>
@@ -119,12 +121,7 @@ inline constexpr bool numerical_profile_q80_a8_down(DecodeNumericalProfile value
 // Stable 64-bit identity of a profile: FNV-1a over its canonical name. Recorded in
 // goldens and receipts; the enum value is not an identity.
 inline constexpr std::uint64_t numerical_profile_identity(DecodeNumericalProfile value) {
-    std::uint64_t hash = 0xcbf29ce484222325ULL;
-    for (const char c : numerical_profile_name(value)) {
-        hash ^= static_cast<unsigned char>(c);
-        hash *= 0x100000001b3ULL;
-    }
-    return hash;
+    return host_fnv::text(numerical_profile_name(value), 0xcbf29ce484222325ULL);
 }
 
 // The profile that differs from `value` only in the dense Q8_0 projections (dense A8 on/off).

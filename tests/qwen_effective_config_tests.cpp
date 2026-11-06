@@ -3421,7 +3421,7 @@ int main(int argc, char** arguments) {
         expect(automatic.environment.at(std::string(entry.substr(0,equal))) == entry.substr(equal+1U), "active environment matches contract");
     }
     for (const auto& entry : qpf2k::defaults) {
-        expect(automatic.environment.at(entry.name) == entry.value && automatic.sources.at(entry.name) == OptionSource::automatic,
+        expect(automatic.environment.at(entry.name) == entry.on && automatic.sources.at(entry.name) == OptionSource::automatic,
             "existing and new defaults retain automatic provenance");
     }
     for (const auto* name : excluded_inactive_env)
@@ -3529,7 +3529,7 @@ int main(int argc, char** arguments) {
                 "an exact prefill off switch keeps the admitted route");
             for (const auto& other : qpf2k::defaults)
                 if (other.item != entry.item)
-                    expect(config.environment.at(other.name) == other.value && config.sources.at(other.name) == OptionSource::automatic,
+                    expect(config.environment.at(other.name) == other.on && config.sources.at(other.name) == OptionSource::automatic,
                         "an exact prefill off switch disables only that item");
             expect(effective_config_json(config).find(std::string("\"") + entry.name +
                 "\":{\"value\":\"0\",\"source\":\"explicit\"}") != std::string::npos,

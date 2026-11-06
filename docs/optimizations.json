@@ -280,6 +280,17 @@
   },
   {
     "engine": "qwen",
+    "name": "Prompt-group size by load",
+    "flag_or_env": "STRIX_PROMPT_BATCH_AUTO, STRIX_PROMPT_BATCH_AUTO_QUEUE",
+    "default": "ON",
+    "exact": "Token ids equal on vs off in every request of 48 paired bursts; scheduling only.",
+    "gain": "8 x 1024 burst: first-token p50 8.62 vs 10.25 s (-21 %), mean completion 9.19 vs 11.22 s (-23 %), makespan +1.2 % (95 % CI -1.3 to +6.0 %, not resolved); 16 x 1024 burst (8 queued): first-token p50 12.63 vs 14.58 s (-15 %), mean completion 14.52 vs 15.51 s (-7.7 %), makespan +0.2 % (95 % CI -1.5 to +1.8 %). 24 paired bursts per cell, fresh server per arm, alternating order.",
+    "preconditions": "HTTP batched server with prompt grouping; no explicit STRIX_PROMPT_BATCH_ROWS. Fills the row budget when no slot is free and at least STRIX_PROMPT_BATCH_AUTO_QUEUE (default 1) requests wait.",
+    "off_switch": "STRIX_PROMPT_BATCH_AUTO=0",
+    "doc_anchor": "docs/optimizations.md#prompt-group-size-by-load"
+  },
+  {
+    "engine": "qwen",
     "name": "PLE page reclaim and prefetch admission",
     "flag_or_env": "STRIX_PLE_RECLAIMABLE=auto",
     "default": "auto",
@@ -943,10 +954,10 @@
     "name": "Engram prefill projection tile with prefetch",
     "flag_or_env": "STRIX_DS41_ENGRAM_F16_PF",
     "default": "on",
-    "exact": "Bitwise: every output byte equals enqueue_f16_rows (rows 1..8192 incl. tile edges, padded strides with guard values, 3 independent F16 weight matrices, BF16-rounded inputs with signed zeros); same per-lane chains, separate multiply and add rounding, same butterfly and storing lane. 164 VGPR, no spill or scratch.",
-    "gain": "Isolated Engram projection (6144 -> 25600, event medians, interleaved arms, 3 weight copies) vs enqueue_f16_rows: rows 32 0.54x, 128 0.87x, 256 0.94x, 512 0.86x, 1024 0.86x (88.1 -> 75.8 ms), 2048 0.86x, 4096 0.86x, 8192 0.87x; 49..64 rows keep enqueue_f16_rows (64 rows: 1.16x). End-to-end TTFT not separately measured.",
+    "exact": "Bitwise: every output byte equals enqueue_f16_rows (rows 1..8192 incl. tile edges, padded strides with guard values, 3 independent F16 weight matrices, BF16-rounded inputs with signed zeros); same per-lane chains, separate multiply and add rounding, same butterfly and storing lane. 164 VGPR, no spill or scratch. Bitwise: fmaf(w, x, acc) equals acc + w * x when w is a finite F16 value and x is zero or a BF16 value with 2^-100 <= |x| < 2^101: the product is zero or has at most 19 significant bits and lies in 2^-124 .. 2^117, so it is exact and normal under any denormal mode (kernel built with IEEE denormals, float_denorm_mode_32 = float_denorm_mode_16_64 = 3). An infinite w gives the same infinity (or NaN against a zero x) in both forms; a NaN w gives NaN in both, payload bits may differ. A per-call scan flags any other x (Inf and NaN included) and the separate form runs instead; a stream under graph capture always takes the separate form. Gate: every output byte equal to enqueue_f16_rows and to STRIX_DS41_ENGRAM_PF_FMA=0 at rows 1..8192, forced tiles, and planted wide-x rows (2^-110, 2^110, subnormal products, non-BF16 values); scan classification asserted per category (signed zeros, 2^-100 and its BF16 neighbour, 2^101 and its BF16 neighbour, Inf, NaN, non-BF16 bits) at the first, middle and last element and with padded strides; full-mantissa x on which the unchecked fused form differs while every gated arm stays equal. Fused 48 x 64 kernel: 191 VGPR, no spill; 349 v_fmac / v_dual_fmac replace 304 multiplies and 281 adds.",
+    "gain": "Isolated Engram projection (6144 -> 25600, event medians, interleaved arms, 3 weight copies) vs enqueue_f16_rows: rows 32 0.54x, 128 0.87x, 256 0.94x, 512 0.86x, 1024 0.86x (88.1 -> 75.8 ms), 2048 0.86x, 4096 0.86x, 8192 0.87x; 49..64 rows keep enqueue_f16_rows (64 rows: 1.16x). End-to-end TTFT not separately measured. With the separate form only (fused multiply-add off, graph capture, per-thread default stream), pieces of up to 2048 rows take a 48 x 32 tile of 512 threads (two workgroups resident per CU, 180 VGPR, no spill), same bits; separate-form timings: 1056 rows 0.998x, 2048 rows 0.992x of the 48 x 64 tile (3 rounds, 5-run medians); 8192 rows keep 48 x 64 (48 x 32 there 1.004x). STRIX_DS41_ENGRAM_PF_TILE=48 forces 48 x 64, =48x32 or =24 force those tiles (read per call). Exact fused multiply-add on the 48 x 64 tile: Isolated Engram projection, 4 weight copies, interleaved arms reversed every round, 5-run medians, two runs: 8192 rows 642.9 -> 613.6 ms and 648.6 -> 620.3 ms (-4.5 / -4.4 %) vs STRIX_DS41_ENGRAM_PF_FMA=0; forced 48 x 64 tile at 2048 rows -3.5 / -1.5 %. Pieces up to 2048 rows take the fused 48 x 64 tile as well: vs the separate 48 x 32 tile, 1056 rows 0.0 / -3.8 / -3.7 %, 2048 rows -2.4 / -3.6 / -3.3 % (three rounds); the separate-only route (FMA=0, graph capture, per-thread default stream) keeps 48 x 32 there. The 48 x 32 tile keeps the separate form (its fused body reaches 192 VGPR and spills: +10..12 %). About -0.11 s per rank at 32K, extrapolated from the isolated timing (8192-row pieces per rank derived from the prefill dispatch code, ~2.44 s of Engram projection per rank). End-to-end TTFT not separately measured.",
     "preconditions": "F16 Engram KV, full aligned view (width 6144, 25600 outputs, first 0, 16-byte aligned, valid strides), 32..8192 rows, row padding at most 9/8 of the 64-row tile (49..64 rows excluded); every other view keeps enqueue_f16_rows.",
-    "off_switch": "STRIX_DS41_ENGRAM_F16_PF=0 (read on every call)",
+    "off_switch": "STRIX_DS41_ENGRAM_F16_PF=0 (read on every call); STRIX_DS41_ENGRAM_PF_TILE=48 keeps the 48 x 64 tile at every row count; STRIX_DS41_ENGRAM_PF_FMA=0 keeps the separate multiply and add",
     "doc_anchor": "docs/optimizations.md#ds-engram-f16-pf"
   },
   {
@@ -1875,6 +1886,17 @@
   },
   {
     "engine": "minimax",
+    "name": "MSA prefill mode 7",
+    "flag_or_env": "STRIX_MM_PF_MSA_REWORK",
+    "default": "7",
+    "exact": "Exact: every partial, score, index and output byte of modes 0..7 in the fused MSA suite; state and final rows identical on both ranks in a 6-vs-7 PAIR A/B.",
+    "gain": "attend call -8.3 % at 28672x4096; TTFT bracketed in-process A/B vs mode 6 8K -5.0 % (-0.78 s), 16K -3.0 % (-0.93 s); 32K fresh process 6/7/6 + 7/6/7 -2.4 % (-1.59 s), result hash identical on both ranks",
+    "preconditions": "Supported MSA prefill shapes.",
+    "off_switch": "STRIX_MM_PF_MSA_REWORK=6 (previous default), =5, =3, =0",
+    "doc_anchor": "docs/optimizations.md#mm-pf-msa-mode7"
+  },
+  {
+    "engine": "minimax",
     "name": "GPU-gated prefill exchange in the rank app",
     "flag_or_env": "STRIX_MM_PFX",
     "default": "on",
@@ -1949,6 +1971,17 @@
     "preconditions": "Sparse decode calls with at least four rows (users or verify-window rows), every row at 16,384 positions or more.",
     "off_switch": "STRIX_MM_SELECT_ONCE=0",
     "doc_anchor": "docs/optimizations.md#mm-select-once"
+  },
+  {
+    "engine": "minimax",
+    "name": "Prefill exchange chunk size 4 MiB",
+    "flag_or_env": "STRIX_MM_PFX_CHUNK",
+    "default": "4194304",
+    "exact": "Pair prefill 1K / 4K / 8K with chunks 1 / 16 / 4 / 1 MiB in fresh processes: prefill state and final-row digests identical in every arm on both ranks (same bytes, same order).",
+    "gain": "Pair prefill TTFT 1 MiB / 4 MiB: 1,024 tokens 2.469 / 2.423 s (414.8 / 422.6 tok/s, -1.9 %), 4,096 tokens 9.168 / 9.025 s (446.8 / 453.9 tok/s, -1.5 %), 8,192 tokens unchanged (about 590 tok/s)",
+    "preconditions": "Pair MiniMax prefill; both ranks use the same chunk size.",
+    "off_switch": "STRIX_MM_PFX_CHUNK=1048576",
+    "doc_anchor": "docs/optimizations.md#mm-pfx-chunk"
   },
   {
     "engine": "minimax",
@@ -2282,9 +2315,20 @@
   },
   {
     "engine": "glm",
+    "name": "Prefill dense rows v3 (grouped projections)",
+    "flag_or_env": "STRIX_GLM_PF_DENSE_ROWS",
+    "default": "3",
+    "exact": "Device test v3 == v2 bitwise over every tile and the grouped production shapes (417 checks, 0 failures); logits bitwise equal on both ranks at 8K across v3 / v2 / v1.",
+    "gain": "8,192-token TTFT at parity with v2 within noise (14.29 vs 14.33 s; 14.80 vs 14.72 s in a second pair run); grouped calls at 8192 rows KDA 9.33 -> 6.77 ms, indexer 8.98 -> 6.62 ms",
+    "preconditions": "Exact chunked prefill.",
+    "off_switch": "STRIX_GLM_PF_DENSE_ROWS=2 (v2) or 1 (v1); --baseline",
+    "doc_anchor": "docs/optimizations.md#glm-pf-dense-rows-v3"
+  },
+  {
+    "engine": "glm",
     "name": "Prefill dense rows v2",
     "flag_or_env": "STRIX_GLM_PF_DENSE_ROWS",
-    "default": "2",
+    "default": "3 (v3); =2 selects v2",
     "exact": "Device test v2 == v1 bitwise over the production shapes (80/80); logits and state bitwise equal v1 on both ranks at 1K and 8K.",
     "gain": "8K TTFT 15.06 -> 14.92 s (544 -> 549 tok/s, -0.9 %), 1K warm 2.80 -> 2.75 s (366 -> 372 tok/s, -1.9 %)",
     "preconditions": "Exact chunked prefill.",
@@ -2378,6 +2422,17 @@
     "preconditions": "Exact chunked prefill with the v2 hyper-connection sites (the default; STRIX_GLM_PF_HC=1 keeps v1 unfused).",
     "off_switch": "STRIX_GLM_PF_HC_FUSE=0, or --baseline",
     "doc_anchor": "docs/optimizations.md#glm-pf-hc-fuse"
+  },
+  {
+    "engine": "glm",
+    "name": "Prefill TP2 partial sum on load in the fused mHC expand",
+    "flag_or_env": "STRIX_GLM_PF_SUMEXP, STRIX_GLM_PF_HC_HOIST",
+    "default": "1, 1",
+    "exact": "Pair kernel bitwise equal to the sum followed by the fused expand (35 checks, 0 failures); hoist placements bitwise (47 checks, 0 failures); pair logits bitwise at 1K, 8K and 32K.",
+    "gain": "Seam sum + fused expand 4.26 -> 3.91 ms per call (-8.2 %); 8,192-token TTFT unchanged within noise",
+    "preconditions": "Exact chunked prefill with async half regions and STRIX_GLM_PF_HC_FUSE=1.",
+    "off_switch": "STRIX_GLM_PF_SUMEXP=0; STRIX_GLM_PF_HC_HOIST=0; --baseline",
+    "doc_anchor": "docs/optimizations.md#glm-pf-sumexp"
   },
   {
     "engine": "glm",
@@ -2554,6 +2609,17 @@
     "preconditions": "Default: queue-1 three-tier plan with file_units * 100 >= total routed units * 70 (planner disk and keys). Measured about 76 % admits auto; 61 % and full card about 1-4 % at tile 2048 stay at 1. Auto reader buffers billed via auto_disk_queue_bound to pinned host memory; fallback to 1 if staging < 2 or they do not fit. Explicit auto and numeric queues unchanged. Landing blocks require an explicit queue.",
     "off_switch": "--tier-disk-queue 1",
     "doc_anchor": "docs/optimizations.md#glm-rtx-disk-queue"
+  },
+  {
+    "engine": "qwen-rtx",
+    "name": "Prompt prefix cache",
+    "flag_or_env": "--prefix-cache; STRIX_QRTX_PREFIX_CACHE; --prefix-cache-host-mb; --prefix-cache-vram-mb; --prefix-cache-block; --prefix-cache-stride",
+    "default": "ON",
+    "exact": "qwen_prefix_cache_e2e 16/16: state digests, 64 ids and logit hashes of fresh == checkpoint-continue == restored into another session == changed suffix == changed boundary token, sync and overlapped prefill; HTTP on vs off outputs identical 8/8.",
+    "gain": "No throughput figure published yet; follow-up agent turns report 48,128-49,664 restored tokens in cached_tokens.",
+    "preconditions": "strix-cuda-qwen-serve; token ids sharing at least one 256-token block with an earlier prompt in the same process and compatibility key.",
+    "off_switch": "--prefix-cache off; STRIX_QRTX_PREFIX_CACHE=0",
+    "doc_anchor": "docs/optimizations.md#qwen-rtx-prefix-cache"
   },
   {
     "engine": "qwen",

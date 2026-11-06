@@ -10,6 +10,7 @@
 #pragma once
 
 #include "glm_model_facts.hpp"
+#include "strix/engine_profile.hpp"
 
 #include <cstdint>
 #include <cstdlib>
@@ -30,84 +31,81 @@ inline EnvGet process_env() {
 // One environment-switched item. on = what the default resolves to, off = the old path. app_sets: the app applies `on`
 // (setenv if unset) because the code's own default is the old path; otherwise `on` is the engine's built-in default and is
 // only reported. in_baseline: the baseline switch sets `off` (if unset).
-struct EnvItem {
-    const char* item;
-    const char* env;
-    const char* on;
-    const char* off;
-    bool app_sets;
-    bool in_baseline;
-    const char* receipt;
-};
+using EnvItem = strix::profile::DefaultItem;
 
 // MoE: STRIX_GLM_MOE=ref (DefaultMoe) stays a per-item switch but is not in the baseline: its prepared experts do not
 // fit the TP2 rank's GTT on the real model (measured OOM: 36,288 x 4 MiB granules), so it is no runnable old path.
 inline const std::vector<EnvItem>& env_items() {
     static const std::vector<EnvItem> items = {
-        {"hp-crc-parallel", "STRIX_DIST_CRC_PARALLEL", "1", "0", true, true,
-         "Measurement: hp host path, exact TTFT 1K -8.5 %, 8K -3.1 %, logits fnv matches reference 16/16"},
-        {"hp-crc-overlap", "STRIX_DIST_HOST_CRC_OVERLAP", "1", "0", true, true, "Measurement: hp host path, exact TTFT 1K -8.5 %, 8K -3.1 %, logits fnv matches reference 16/16"},
-        {"hp-chunk-bytes", "STRIX_DIST_HOST_CHUNK_BYTES", "1048576", "0", true, true, "Measurement: hp host path, exact TTFT 1K -8.5 %, 8K -3.1 %, logits fnv matches reference 16/16"},
-        {"pf-pipeline-2", "STRIX_GLM_PF_PIPELINE", "2", "1", true, true,
-         "Measurement: N=2 whole-layer prefill pipeline + async start, prefill gate bitwise, 8K -4.0 % (needs dist-async-start)"},
-        {"dist-async-start", "STRIX_DIST_ASYNC_START", "1", "0", true, true,
-         "Measurement: async exchange start (full-host chunked path; only the pipeline uses it)"},
-        {"hsa-no-fragment-allocator", "HSA_DISABLE_FRAGMENT_ALLOCATOR", "1", "0", true, true,
-         "Measurement: production decode and prefill configuration; allocator granules fit GTT"},
-        {"r1b-dense-auto", "STRIX_GLM_R1B_DENSE", "7", "2", false, true,
-         "Measurement: R1b-fast kernels -7.8 % R1 / -5.4 % R8, same tokens"},
-        {"r1b-hc-v4", "STRIX_GLM_R1B_HC", "4", "1", false, true, "Measurement: with r1b-dense-auto, R1b-fast kernels -7.8 % R1 / -5.4 % R8, same tokens"},
-        {"hc-pre-v7", "STRIX_GLM_HC_PRE_V", "7", "4", false, true,
-         "Measurement: hc_pre 77.4-77.9 vs 102.1-102.8 us, gates 0-7 bitwise; tokens match reference"},
-        {"post-exchange-fast", "STRIX_GLM_POST", "fast", "ref", false, true,
-         "Measurement: fast post-exchange consumers match STRIX_GLM_POST=ref and reference (real model, 6 layers)"},
-        {"attn-fast", "STRIX_GLM_ATTN", "fast", "ref", false, true,
-         "Measurement: FastAttn matches STRIX_GLM_ATTN=ref (G3), Tier A 12-40x"},
-        {"attn-tierb-fused", "STRIX_GLM_TIERB", "fused", "lib", false, true,
-         "Measurement: fused Tier B -2.46 ms/token vs strix_gemv, tokens match reference"},
-        {"spec-xfer", "STRIX_GLM_SPEC_XCH", "xfer", "comm", false, true,
-         "Measurement: verify + MTP drafter on XferExchange, token vectors match --mtp 0, SP1a PASS"},
-        {"hc-norm-fused", "STRIX_GLM_HC_NORM", "1", "0", true, true,
-         "Measurement: R1b decode hc_fin + RMSNorm fused, tokens and R8 match reference; pair ABA x2 -2.3 % C1 MTP, -3.1 % R8"},
-        {"hc-site-launch", "STRIX_GLM_HC_SITE", "1", "0", false, true,
-         "Measurement: one launch per one-row decode mHC site, same bits; pair ABBA C1 -1.45 %, R8 unchanged (G-02)"},
-        {"step-flag-deferred", "STRIX_GLM_STEP_FLAG", "1", "0", false, true,
-         "Measurement: plain decode checks the layers' checkpoints with the head's (one host sync less per step), same bits (G-02)"},
-        {"spec-kda-tree-2", "STRIX_GLM_SPEC_KDA_TREE", "2", "1", true, true,
-         "Measurement: two-barrier KDA verify tree, bitwise == 9-barrier tree, token vectors match --mtp 0, +2.8 %"},
-        {"xfer-boundary-fused", "STRIX_GLM_BOUNDARY", "1", "0", false, true,
-         "Measurement: Xfer reduce +1.41 -> fused boundary ~+1.10 ms/token over local, bitwise"},
-        {"moe-fast", "STRIX_GLM_MOE", "fast", "ref", false, false,
-         "Measurement: FastMoe matches DefaultMoe bitwise (real TP2 slices); raw-only experts (fits GTT)"},
+        {"hp-crc-parallel", "STRIX_DIST_CRC_PARALLEL", "1", "0",
+         "Measurement: hp host path, exact TTFT 1K -8.5 %, 8K -3.1 %, logits fnv matches reference 16/16", true, true},
+        {"hp-crc-overlap", "STRIX_DIST_HOST_CRC_OVERLAP", "1", "0",
+         "Measurement: hp host path, exact TTFT 1K -8.5 %, 8K -3.1 %, logits fnv matches reference 16/16", true, true},
+        {"hp-chunk-bytes", "STRIX_DIST_HOST_CHUNK_BYTES", "1048576", "0",
+         "Measurement: hp host path, exact TTFT 1K -8.5 %, 8K -3.1 %, logits fnv matches reference 16/16", true, true},
+        {"pf-pipeline-2", "STRIX_GLM_PF_PIPELINE", "2", "1",
+         "Measurement: N=2 whole-layer prefill pipeline + async start, prefill gate bitwise, 8K -4.0 % (needs dist-async-start)", true, true},
+        {"dist-async-start", "STRIX_DIST_ASYNC_START", "1", "0",
+         "Measurement: async exchange start (full-host chunked path; only the pipeline uses it)", true, true},
+        {"hsa-no-fragment-allocator", "HSA_DISABLE_FRAGMENT_ALLOCATOR", "1", "0",
+         "Measurement: production decode and prefill configuration; allocator granules fit GTT", true, true},
+        {"r1b-dense-auto", "STRIX_GLM_R1B_DENSE", "7", "2",
+         "Measurement: R1b-fast kernels -7.8 % R1 / -5.4 % R8, same tokens", false, true},
+        {"r1b-hc-v4", "STRIX_GLM_R1B_HC", "4", "1",
+         "Measurement: with r1b-dense-auto, R1b-fast kernels -7.8 % R1 / -5.4 % R8, same tokens", false, true},
+        {"hc-pre-v7", "STRIX_GLM_HC_PRE_V", "7", "4",
+         "Measurement: hc_pre 77.4-77.9 vs 102.1-102.8 us, gates 0-7 bitwise; tokens match reference", false, true},
+        {"post-exchange-fast", "STRIX_GLM_POST", "fast", "ref",
+         "Measurement: fast post-exchange consumers match STRIX_GLM_POST=ref and reference (real model, 6 layers)", false, true},
+        {"attn-fast", "STRIX_GLM_ATTN", "fast", "ref",
+         "Measurement: FastAttn matches STRIX_GLM_ATTN=ref (G3), Tier A 12-40x", false, true},
+        {"attn-tierb-fused", "STRIX_GLM_TIERB", "fused", "lib",
+         "Measurement: fused Tier B -2.46 ms/token vs strix_gemv, tokens match reference", false, true},
+        {"spec-xfer", "STRIX_GLM_SPEC_XCH", "xfer", "comm",
+         "Measurement: verify + MTP drafter on XferExchange, token vectors match --mtp 0, SP1a PASS", false, true},
+        {"hc-norm-fused", "STRIX_GLM_HC_NORM", "1", "0",
+         "Measurement: R1b decode hc_fin + RMSNorm fused, tokens and R8 match reference; pair ABA x2 -2.3 % C1 MTP, -3.1 % R8", true, true},
+        {"hc-site-launch", "STRIX_GLM_HC_SITE", "1", "0",
+         "Measurement: one launch per one-row decode mHC site, same bits; pair ABBA C1 -1.45 %, R8 unchanged (G-02)", false, true},
+        {"step-flag-deferred", "STRIX_GLM_STEP_FLAG", "1", "0",
+         "Measurement: plain decode checks the layers' checkpoints with the head's (one host sync less per step), same bits (G-02)", false, true},
+        {"spec-kda-tree-2", "STRIX_GLM_SPEC_KDA_TREE", "2", "1",
+         "Measurement: two-barrier KDA verify tree, bitwise == 9-barrier tree, token vectors match --mtp 0, +2.8 %", true, true},
+        {"xfer-boundary-fused", "STRIX_GLM_BOUNDARY", "1", "0",
+         "Measurement: Xfer reduce +1.41 -> fused boundary ~+1.10 ms/token over local, bitwise", false, true},
+        {"moe-fast", "STRIX_GLM_MOE", "fast", "ref",
+         "Measurement: FastMoe matches DefaultMoe bitwise (real TP2 slices); raw-only experts (fits GTT)", false, false},
         // =7 restores the previous large-call core (X2), =3 v3 for every call; the baseline restores v1.
-        {"pf-exact-moe-auto", "STRIX_GLM_PF_EXACTMOE_V", "auto", "1", true, true,
-         "Measurement: exact MoE auto (v14 through the X3 core with row-bucketed tiles and folded remainders for calls >= 128 rows, v3 with row buckets below), outputs bitwise; 8K TTFT -19.5 % and 1K -15 % vs the X2 core; MoE call -3..-6 % vs v11"},
-        {"pf-exact-moe-plan", "STRIX_GLM_PF_EXACTMOE_PLAN", "device", "host", false, true,
-         "Measurement: exact MoE device plan (pairs/tiles/groups built on the GPU, byte-equal to the host plan; no route download or host sync per MoE call)"},
-        {"pf-exact-x", "STRIX_GLM_PF_EXACT_X", "auto", "0", true, true,
-         "Measurement: exact X3 prefill linear core (scalar activations, eight rows per wave) for calls >= 2048 rows (TM16 below), bitwise; 8K TTFT -14.3 % vs X2"},
-        {"pf-obar-v7", "STRIX_GLM_PF_OBAR", "7", "2", false, true,
-         "Measurement: MLA o-bar v7 bitwise == v5 (96/0), 9.0-10.2 vs 16.6-17.3 us/row per DSA layer at t0 4096..28672 (=5 restores v5)"},
-        {"pf-scores-v7", "STRIX_GLM_PF_SCORES", "7", "2", false, true,
-         "Measurement: MLA scores v7 (v6 in 256-row grid groups) bitwise == v6 / v5, 4.90 / 6.08 / 7.87 / 9.89 vs v6 4.96 / 8.42 / 9.41 / 10.46 us/row per DSA layer at t0 0 / 4096 / 12288 / 28672 (=6 restores v6)"},
-        {"pf-mla-gemm-v3", "STRIX_GLM_PF_MLA_GEMM", "3", "2", false, true,
-         "Measurement: MLA absorb / out GEMM v3 (128x128 VALU tiles, same ascending-k FMA chains) bitwise == v2 on the pair at 8K / 32K, MLA GEMM 0.715 -> 0.425 s (8K) and 2.853 -> 1.628 s (32K) per rank (=2 restores v2, =1 legacy)"},
-        {"pf-kda-scan-v5", "STRIX_GLM_PF_KDA_SCAN", "5", "1", false, true,
-         "Measurement: KDA scan v5 (quad-DPP tree, batch fill off the serial path) bitwise == v3 / v1 and decode, 1.84-1.86 -> 1.18-1.20 us/row per KDA layer at t0 0..28672 (v3 1.23-1.25; =3 restores v3)"},
-        {"pf-indexer-v3", "STRIX_GLM_PF_IDX", "3", "1", false, true,
-         "Measurement: indexer scores v3 same keys as v2, 5.3 vs 9.6 us/row per DSA layer at t0 28672 (=2 restores v2)"},
-        {"pf-select-v2", "STRIX_GLM_PF_SELECT", "2", "1", false, true,
-         "Measurement: indexer select v2 same token lists as v1, 0.38 vs 0.99 us/row at t0 28672, 0.08 vs 0.50 at t0 4096"},
-        {"pf-dense-rows-v2", "STRIX_GLM_PF_DENSE_ROWS", "2", "1", false, true,
-         "Measurement: prefill dense rows v2 (8 x 4 chains per thread, packed weight loads, same ascending fmaf chain) bitwise == v1 on the pair at 1K / 8K, KDA f_b / g_b 1.19-1.21x, 8K TTFT 15.06 -> 14.92 s (=1 restores v1)"},
-        {"max-rows-auto", "STRIX_GLM_MAX_ROWS_AUTO", "1", "0", false, true,
-         "Measurement: exact 8192 vs 4096 rows, 8K TTFT -4 %, 32K 116.3 -> 109.9 s (-5.5 %); +7.3 GiB per rank"},
-        {"pf-staged", "STRIX_GLM_PF_STAGED", "1", "0", false, true,
-         "Measurement: pipelined prefill exchanges through the coherent staging views; pair ABBA -0.8 % 1K / -0.9 % 8K TTFT, logits bitwise"},
-        {"pf-hc-fuse", "STRIX_GLM_PF_HC_FUSE", "1", "0", false, true,
-         "Measurement: mHC expand + next-site norm fused (F not materialised), logits bitwise; pair ABBA x2 -1.1 % 1K / -1.3 % 8K TTFT"},
-        {"pf-mixnorm", "STRIX_GLM_PF_MIXNORM", "1", "0", false, true,
-         "Measurement: mHC mix collapse + RMSNorm in one kernel (same operation order), logits bitwise on the pair at 1K / 8K / 32K; 8K TTFT 15.07 -> 14.95 s, 32K 63.23 -> 62.23 s (=0 restores the two-kernel path)"},
+        {"pf-exact-moe-auto", "STRIX_GLM_PF_EXACTMOE_V", "auto", "1",
+         "Measurement: exact MoE auto (v14 through the X3 core with row-bucketed tiles and folded remainders for calls >= 128 rows, v3 with row buckets below), outputs bitwise; 8K TTFT -19.5 % and 1K -15 % vs the X2 core; MoE call -3..-6 % vs v11", true, true},
+        {"pf-exact-moe-plan", "STRIX_GLM_PF_EXACTMOE_PLAN", "device", "host",
+         "Measurement: exact MoE device plan (pairs/tiles/groups built on the GPU, byte-equal to the host plan; no route download or host sync per MoE call)", false, true},
+        {"pf-exact-x", "STRIX_GLM_PF_EXACT_X", "auto", "0",
+         "Measurement: exact X3 prefill linear core (scalar activations, eight rows per wave) for calls >= 2048 rows (TM16 below), bitwise; 8K TTFT -14.3 % vs X2", true, true},
+        {"pf-obar-v7", "STRIX_GLM_PF_OBAR", "7", "2",
+         "Measurement: MLA o-bar v7 bitwise == v5 (96/0), 9.0-10.2 vs 16.6-17.3 us/row per DSA layer at t0 4096..28672 (=5 restores v5)", false, true},
+        {"pf-scores-v7", "STRIX_GLM_PF_SCORES", "7", "2",
+         "Measurement: MLA scores v7 (v6 in 256-row grid groups) bitwise == v6 / v5, 4.90 / 6.08 / 7.87 / 9.89 vs v6 4.96 / 8.42 / 9.41 / 10.46 us/row per DSA layer at t0 0 / 4096 / 12288 / 28672 (=6 restores v6)", false, true},
+        {"pf-mla-gemm-v3", "STRIX_GLM_PF_MLA_GEMM", "3", "2",
+         "Measurement: MLA absorb / out GEMM v3 (128x128 VALU tiles, same ascending-k FMA chains) bitwise == v2 on the pair at 8K / 32K, MLA GEMM 0.715 -> 0.425 s (8K) and 2.853 -> 1.628 s (32K) per rank (=2 restores v2, =1 legacy)", false, true},
+        {"pf-kda-scan-v5", "STRIX_GLM_PF_KDA_SCAN", "5", "1",
+         "Measurement: KDA scan v5 (quad-DPP tree, batch fill off the serial path) bitwise == v3 / v1 and decode, 1.84-1.86 -> 1.18-1.20 us/row per KDA layer at t0 0..28672 (v3 1.23-1.25; =3 restores v3)", false, true},
+        {"pf-indexer-v3", "STRIX_GLM_PF_IDX", "3", "1",
+         "Measurement: indexer scores v3 same keys as v2, 5.3 vs 9.6 us/row per DSA layer at t0 28672 (=2 restores v2)", false, true},
+        {"pf-select-v2", "STRIX_GLM_PF_SELECT", "2", "1",
+         "Measurement: indexer select v2 same token lists as v1, 0.38 vs 0.99 us/row at t0 28672, 0.08 vs 0.50 at t0 4096", false, true},
+        {"pf-dense-rows-v3", "STRIX_GLM_PF_DENSE_ROWS", "3", "1",
+         "Measurement: prefill dense rows v3 groups the projections of one input (KDA f_a / g_a / b, DSA wk / gate / weights_proj) in one 128 x 64 launch, same ascending fmaf chain, bitwise == v2; grouped calls 6.77 vs 9.33 ms (KDA) and 6.62 vs 8.98 ms (DSA) at 8192 rows; TTFT 14.34 -> 14.29 s at 8,192 tokens (=2 restores v2, =1 v1)", false, true},
+        {"max-rows-auto", "STRIX_GLM_MAX_ROWS_AUTO", "1", "0",
+         "Measurement: exact 8192 vs 4096 rows, 8K TTFT -4 %, 32K 116.3 -> 109.9 s (-5.5 %); +7.3 GiB per rank", false, true},
+        {"pf-staged", "STRIX_GLM_PF_STAGED", "1", "0",
+         "Measurement: pipelined prefill exchanges through the coherent staging views; pair ABBA -0.8 % 1K / -0.9 % 8K TTFT, logits bitwise", false, true},
+        {"pf-hc-fuse", "STRIX_GLM_PF_HC_FUSE", "1", "0",
+         "Measurement: mHC expand + next-site norm fused (F not materialised), logits bitwise; pair ABBA x2 -1.1 % 1K / -1.3 % 8K TTFT", false, true},
+        {"pf-mixnorm", "STRIX_GLM_PF_MIXNORM", "1", "0",
+         "Measurement: mHC mix collapse + RMSNorm in one kernel (same operation order), logits bitwise on the pair at 1K / 8K / 32K; 8K TTFT 15.07 -> 14.95 s, 32K 63.23 -> 62.23 s (=0 restores the two-kernel path)", false, true},
+        {"pf-sumexp", "STRIX_GLM_PF_SUMEXP", "1", "0",
+         "Measurement: TP2 partial sum formed on load by the fused mHC expand (rank order, the sum2 expression; summed rows not stored), logits bitwise on the pair; RECEIPT_PENDING (=0 restores sum2 + expand)", false, true},
     };
     return items;
 }
@@ -269,9 +267,10 @@ inline Effective resolve(const Request& r, const EnvGet& env, const ModelFacts& 
     else if (e.prefill == "ref") e.max_rows = {"4096", "auto-4096-ref"};
     else e.max_rows = {"8192", "auto-8192"};
     for (const auto& it : env_items()) {
-        if (const char* v = env(it.env)) e.env[it.env] = {v, "explicit"};
-        else if (e.baseline && it.in_baseline) e.env[it.env] = {it.off, "baseline"};
-        else e.env[it.env] = {it.on, "default"};
+        const auto v = strix::profile::resolve_default(it, e.baseline, env);
+        using Source = strix::profile::DefaultSource;
+        e.env[it.env] = {v.value, v.source == Source::env || v.source == Source::cli ? "explicit" :
+                                v.source == Source::baseline ? "baseline" : "default"};
     }
     return e;
 }
@@ -321,7 +320,7 @@ inline std::string print(const Effective& e) {
     s += "effective xch=" + e.xch + "\n";
     for (const auto& it : env_items()) {
         const Value& v = e.env.at(it.env);
-        s += std::string("effective env ") + it.env + "=" + v.value + " (" + v.source + ", item " + it.item + ")\n";
+        s += std::string("effective env ") + it.env + "=" + v.value + " (" + v.source + ", item " + it.name + ")\n";
     }
     return s;
 }

@@ -538,7 +538,7 @@ inline MtpDecodeBatchServe make_http_batch_serve(const Options& options, std::st
             submit(std::move(request));
         };
         std::optional<serve::TakenJob> deferred;
-        runner.set_service_admission([&]{return !deferred && queue.has_queued_work();},[&](const MtpBatchRunner::AdmissionSink& prepare,const std::function<bool()>& can_prepare) {
+        runner.set_service_admission([&]()->std::size_t{return deferred || !queue.has_queued_work() ? 0U : std::max<std::size_t>(1U,static_cast<std::size_t>(queue.snapshot().queued));},[&](const MtpBatchRunner::AdmissionSink& prepare,const std::function<bool()>& can_prepare) {
             while(!deferred && can_prepare()) {
                 auto job=queue.take(false);
                 if(!job) break;

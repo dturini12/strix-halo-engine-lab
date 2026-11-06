@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Engine receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "engine",
+    "identity",
+    "implementation",
+    "build",
+    "kernel",
+    "device",
+    "topology",
+    "digests",
+    "command"
+  ],
+  "properties": {
+    "schema": {
+      "const": "strix-engine-receipt/v1"
+    },
+    "engine": {
+      "type": "string"
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "arithmetic_contract",
+        "model_sha256",
+        "pack_hash",
+        "table_hash",
+        "state_format",
+        "prefill_lineage",
+        "reduction_plan"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{16}$"
+        },
+        "arithmetic_contract": {
+          "type": "string"
+        },
+        "model_sha256": {
+          "type": "string",
+          "pattern": "^([0-9a-f]{64})?$"
+        },
+        "pack_hash": {
+          "type": "string"
+        },
+        "table_hash": {
+          "type": "string"
+        },
+        "state_format": {
+          "type": "string"
+        },
+        "prefill_lineage": {
+          "type": "string"
+        },
+        "reduction_plan": {
+          "type": "string"
+        }
+      }
+    },
+    "implementation": {
+      "type": "string"
+    },
+    "build": {
+      "type": "string"
+    },
+    "kernel": {
+      "type": "string"
+    },
+    "device": {
+      "type": "string"
+    },
+    "topology": {
+      "type": "string"
+    },
+    "digests": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "command": {
+      "type": "string"
+    }
+  }
+}

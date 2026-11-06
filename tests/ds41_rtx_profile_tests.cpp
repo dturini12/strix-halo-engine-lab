@@ -1,6 +1,6 @@
-// CPU tests of the DS RTX --profile resolver (strix/ds41_rtx_profile.hpp): the table, precedence (CLI > environment >
+// CPU tests of the DS RTX --profile resolver (strix/profiles/ds41_rtx.hpp): the table, precedence (CLI > environment >
 // profile > builtin, --baseline in order), pending refusal and listing, --allow-pending stamping, the selection.
-#include "strix/ds41_rtx_profile.hpp"
+#include "strix/profiles/ds41_rtx.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -183,6 +183,72 @@ int main() {
     CHECK(j.find("\"wb_stream\":{\"value\":\"on\",\"status\":\"profile\",\"effective\":\"on\",\"switch\":\"--wb-stream --no-wb-stream STRIX_DS41_WB_STREAM\"") !=
           std::string::npos);
     CHECK(j.rfind("{\"profile\":\"default\",\"app\":\"replica\",\"qualification\":\"qualified\",\"allow_pending\":false,\"levers\":{", 0) == 0);
+
+    // Every row, every native option, both apps: baseline is ordered with CLI;
+    // own environment booleans and empty values retain the replica's policy.
+    for (const auto app : {pf::App::replica, pf::App::prefill_service}) {
+        for (const auto& row : pf::levers()) if (row.apps & unsigned(app)) {
+            const auto key = std::string(row.name);
+            const auto get = [&](std::vector<std::string> args, std::map<std::string, std::string> env = {}) {
+                return run(std::move(args), std::move(env), app);
+            };
+            if (row.baseline) {
+                for (const auto& baseline : {get({"--baseline"}), get({}, {{"STRIX_DS41_RTX_BASELINE", "1"}})}) {
+                    CHECK(baseline.find(key)->value == "off");
+                }
+            }
+            if (!row.env.empty()) {
+                for (const char* v : {"0", "1", "false", ""}) {
+                    const auto env = std::map<std::string, std::string>{{std::string(row.env), v}};
+                    const auto resolved = get({}, env);
+                    CHECK(resolved.find(key)->value == (std::string_view(v) == "0" ? "off" : "on"));
+                    CHECK(resolved.find(key)->status == (*v ? pf::Status::explicit_env : pf::Status::profile));
+                    auto base_env = env; base_env["STRIX_DS41_RTX_BASELINE"] = "1";
+                    if (row.baseline) CHECK(get({}, base_env).find(key)->status == pf::Status::baseline_env);
+                }
+            }
+            for (const auto& option : row.options) if (!option.flag.empty()) {
+                std::vector<std::string> args{std::string(option.flag)};
+                const std::string wanted = option.value == "*" ? "0" : std::string(option.value);
+                if (option.value == "*") args.push_back(wanted);
+                const auto own = get(args);
+                CHECK(own.find(key)->value == wanted && own.find(key)->status == pf::Status::explicit_cli);
+                auto after = args; after.push_back("--baseline");
+                const auto last_baseline = get(after);
+                CHECK(last_baseline.find(key)->value == (row.baseline ? "off" : wanted));
+                CHECK(last_baseline.find(key)->status == (row.baseline ? pf::Status::baseline_cli : pf::Status::explicit_cli));
+                auto before = args; before.insert(before.begin(), "--baseline");
+                CHECK(get(before).find(key)->value == wanted && get(before).find(key)->status == pf::Status::explicit_cli);
+                CHECK(get(args, {{"STRIX_DS41_RTX_BASELINE", "1"}}).find(key)->status == pf::Status::explicit_cli);
+                if (!row.env.empty()) CHECK(get(args, {{std::string(row.env), "0"}}).find(key)->value == wanted);
+            }
+        }
+        const auto resolved = run({}, {}, app);
+        const auto unknown = resolved.host_receipt();
+        CHECK(unknown.engine == "deepseek41-rtx" && unknown.implementation == pf::app_name(app));
+        CHECK(unknown.identity.arithmetic_contract.empty() && unknown.identity.model_sha256.empty() && unknown.identity.pack_hash.empty());
+        CHECK(unknown.identity.table_hash.empty() && unknown.identity.state_format.empty() && unknown.identity.prefill_lineage.empty());
+        CHECK(unknown.identity.reduction_plan.empty() && unknown.build.empty() && unknown.kernel.empty() && unknown.device.empty() && unknown.topology.empty());
+        CHECK(unknown.digests.size() == 1 && unknown.digests[0].first == "profile_json_fnv1a64");
+        CHECK(unknown.digests[0].second == strix::profile::hex_identity(strix::host_fnv::text(resolved.json())));
+        strix::profile::NumericalIdentity identity;
+        identity.arithmetic_contract = "caller-admitted-rtx-contract";
+        identity.state_format = "caller-known-state-format";
+        const auto receipt = resolved.host_receipt(identity);
+        CHECK(receipt.identity.id() == identity.id());
+        CHECK(receipt.witness() == "strix-engine-witness " + receipt.json() + "\n");
+    }
+    // Shared admission must not add the common builtin shortcut: RTX reports an
+    // unready wanted==builtin column pending, even when both strings match.
+    for (const bool ready : {false, true}) for (const bool runnable : {false, true})
+    for (const bool allow : {false, true}) for (const auto profile : {pf::Name::standard, pf::Name::fast}) {
+        pf::Lever row{.name = "same_builtin", .value = {"off", "off", "off"}, .builtin = "off",
+                      .ready = {ready, ready, ready}, .runnable = {runnable, runnable, runnable}, .apps = 1U, .source = {}};
+        const auto r = pf::resolve(profile, allow, pf::App::replica, in({}), std::span(&row, 1));
+        const auto expected = ready ? pf::Status::profile : allow && runnable ? pf::Status::unqualified : pf::Status::pending;
+        CHECK(r.find("same_builtin")->status == expected && r.find("same_builtin")->value == "off");
+        CHECK(r.find("same_builtin")->wanted == (ready ? "" : "off"));
+    }
 
     if (failures) {
         std::fprintf(stderr, "ds41_rtx_profile_tests: %d failure(s)\n", failures);

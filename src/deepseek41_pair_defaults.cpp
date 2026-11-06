@@ -204,12 +204,38 @@ const std::vector<std::pair<std::string, std::string>>& baseline_off_items() {
     // 2026-10-25 release: D1 shared expert as grouped SwiGLU pairs. 2026-10-26 release: D1b fused shared
     // down, prefill MoE form 7, exact dense selector, attention window fold / live chunks / f16 tile, serve warm-up
     // and the DSpark cost calibration that follows it.
-    static const std::vector<std::pair<std::string, std::string>> items = {
-        {"STRIX_DS41_SHARED_GROUPED", "0"}, {"STRIX_DS41_SHARED_DOWN_FUSED", "0"}, {"STRIX_DS41_MOE_PREFILL", "0"},
-        {"STRIX_DS41_DENSE_SELECT", "0"},   {"STRIX_DS41_ATTN_WINDOW_FOLD", "0"},  {"STRIX_DS41_ATTN_LIVE_CHUNKS", "0"},
-        {"STRIX_DS41_ATTN_TILE_F16", "0"},  {"STRIX_DS41_SERVE_WARM", "0"},        {"STRIX_DS41_DSPARK_CALIB", "0"},
+    static const auto items = [] {
+        std::vector<std::pair<std::string, std::string>> out;
+        for (const auto& row : default_items()) out.emplace_back(row.env, row.off);
+        return out;
+    }();
+    return items;
+}
+
+std::span<const strix::profile::DefaultItem> default_items() {
+    static constexpr strix::profile::DefaultItem items[] = {
+        {"shared_grouped", "STRIX_DS41_SHARED_GROUPED", "", "0", ""},
+        {"shared_down_fused", "STRIX_DS41_SHARED_DOWN_FUSED", "", "0", ""},
+        {"moe_prefill", "STRIX_DS41_MOE_PREFILL", "", "0", ""},
+        {"dense_select", "STRIX_DS41_DENSE_SELECT", "", "0", ""},
+        {"attn_window_fold", "STRIX_DS41_ATTN_WINDOW_FOLD", "", "0", ""},
+        {"attn_live_chunks", "STRIX_DS41_ATTN_LIVE_CHUNKS", "", "0", ""},
+        {"attn_tile_f16", "STRIX_DS41_ATTN_TILE_F16", "", "0", ""},
+        {"serve_warm", "STRIX_DS41_SERVE_WARM", "", "0", ""},
+        {"dspark_calib", "STRIX_DS41_DSPARK_CALIB", "", "0", ""},
     };
     return items;
+}
+
+strix::profile::ExecutionReceipt host_receipt(App app, const Resolved& resolved,
+                                             strix::profile::NumericalIdentity identity) {
+    strix::profile::ExecutionReceipt out;
+    out.engine = "deepseek41-pair";
+    out.implementation = app_name(app);
+    out.identity = std::move(identity);
+    if (resolved.profile)
+        out.digests.emplace_back("profile_fingerprint", strix::profile::hex_identity(resolved.profile->fingerprint()));
+    return out;
 }
 
 Resolved resolve(App app, const std::vector<std::string>& in, const Getenv& raw_env, const Probe& probe, const Build& build) {
@@ -243,7 +269,10 @@ Resolved resolve(App app, const std::vector<std::string>& in, const Getenv& raw_
 
     const bool baseline = set(env("STRIX_DS41_BASELINE")) && !zero(env("STRIX_DS41_BASELINE"));
     if (baseline) {
-        for (const auto& [name, value] : baseline_off_items()) put(name.c_str(), value);
+        for (const auto& row : default_items()) {
+            const auto value = strix::profile::resolve_default(row, true, env);
+            if (value.source == strix::profile::DefaultSource::baseline) put(row.env, value.value);
+        }
         r.args = std::move(user);
         resolve_sessions(app, r, env, probe, true);
         return r;

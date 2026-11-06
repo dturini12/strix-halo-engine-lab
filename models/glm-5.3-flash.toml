@@ -1,0 +1,68 @@
+schema = "strix-model/v1"
+name = "glm-5.3-flash"
+
+# Descriptive assertions only. The explicit GLM adapter owns tensor mapping,
+# mHC/KDA/DSA state effects, routing and compiled schedules. Identity output
+# remains in engine code; this file never supplies printed identity text.
+[graph]
+adapter = "glm-5.3-flash-v1"
+attention_pattern = "kda,kda,kda,dsa"
+ffn_pattern = "dense:0-2,moe:3-44"
+
+[dims]
+hidden = 4096
+layers = 45
+vocab = 154880
+intermediate = 12288
+
+[attention]
+kind = "kda+dsa"
+
+[attention.kda]
+heads = 64
+head_dim = 128
+qkv = 8192
+conv_kernel = 4
+
+[attention.mla]
+q_lora = 1536
+kv_lora = 512
+heads = 64
+head_dim = 256
+rope_dim = 0
+
+[attention.select]
+heads = 32
+head_dim = 128
+pool = 4
+top_k = 2048
+pools = 512
+
+[moe]
+experts = 288
+top_k = 8
+intermediate = 2048
+first_layer = 3
+shared = 1
+
+[extras.hyper_connections]
+rank = 4
+mix = 24
+iterations = 20
+
+[extras.mtp]
+layer = 45
+heads = 1
+
+[arithmetic]
+rms_eps = 1e-5
+hc_eps = 1e-6
+l2_eps = 1e-6
+ln_eps = 1e-6
+gate_lower_bound = -5.0
+clamp = 10.0
+route_scale = 2.5
+route_den_eps = 1e-20
+inv_sqrt128 = 0.088388347648318
+inv_sqrt32 = 0.17677669529663687
+mla_scale = 0.0625

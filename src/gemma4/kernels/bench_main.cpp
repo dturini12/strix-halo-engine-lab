@@ -1,5 +1,5 @@
 #include "device.hpp"
-#include "gemma4/engine/profile.hpp"
+#include "strix/profiles/gemma4.hpp"
 #include "a8_host.hpp"
 #include <algorithm>
 #include <chrono>

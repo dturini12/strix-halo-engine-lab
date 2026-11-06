@@ -2,7 +2,7 @@
 
 #include "host_backend.hpp"
 #include "api.hpp"
-#include "profile.hpp"
+#include "strix/profiles/gemma4.hpp"
 #include "gemma4/eagle/session.hpp"
 #include "gemma4/eagle/mtp/session.hpp"
 

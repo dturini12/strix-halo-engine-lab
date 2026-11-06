@@ -22,7 +22,7 @@ inline constexpr std::array<strix::profile::Lever, 2> profile_table{{
     {"moe_relaxed", "STRIX_DS41_FAST_MOE", "", {"", "1", ""}, "0", strix::profile::Kind::bit_changing,
      {true, false, true}, {true, true, true}, "", "0",
      "selected for fast ahead of its qualification receipt (ds41-moe-relaxed-v1, in progress); changes logits",
-     {false, true, false}},
+     false, {false, true, false}},
 }};
 
 }  // namespace strix::deepseek41::pair_defaults

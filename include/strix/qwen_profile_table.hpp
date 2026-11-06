@@ -1,5 +1,5 @@
 #pragma once
-// Included by qwen_profile.hpp inside strix::qwen::profile. This is the single
+// Included by profiles/qwen.hpp inside strix::qwen::profile. This is the single
 // product table. Columns are default, fast, quality; empty means leave alone.
 // Ready means qualified; runnable means implemented. Promotion requires
 // compiler, native execution, model fidelity and complete-workload gates.

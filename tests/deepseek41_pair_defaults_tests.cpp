@@ -551,6 +551,77 @@ void test_profile() {
     }
 }
 
+void test_common_adapter() {
+    namespace pr = strix::profile;
+    for (const auto& rc : receipts) {
+        const auto args = plain(rc);
+        check(pd::default_items().size() == pd::baseline_off_items().size(), "shared defaults table covers baseline exports");
+        for (const auto& row : pd::default_items()) {
+            World w;
+            const auto plain_result = w.run(rc.app, args);
+            for (const auto& e : plain_result.set_env) check(e.first != row.env, "plain defaults leave code builtin untouched");
+            w.env[row.env] = row.off;
+            auto result = w.run(rc.app, args);
+            check(env_of(result).count(row.env) == 0, "individual OFF remains explicit: " + std::string(row.name));
+            w.env["STRIX_DS41_BASELINE"] = "1";
+            result = w.run(rc.app, args);
+            auto expected = pd::baseline_off_items();
+            expected.erase(std::remove_if(expected.begin(), expected.end(), [&](const auto& e) { return e.first == row.env; }), expected.end());
+            check(result.set_env == expected, "baseline preserves individual OFF and every other row: " + std::string(row.name));
+            for (const char* value : {"", "1"}) {
+                w.env[row.env] = value;
+                check(w.run(rc.app, args).set_env == expected, "baseline preserves explicit empty/ON: " + std::string(row.name));
+            }
+        }
+        const auto result = World{}.run(rc.app, args);
+        const auto unknown = pd::host_receipt(rc.app, result);
+        check(unknown.engine == "deepseek41-pair" && unknown.implementation == pd::app_name(rc.app), "known pair host provenance");
+        check(unknown.identity.arithmetic_contract.empty() && unknown.identity.model_sha256.empty() && unknown.identity.pack_hash.empty() &&
+              unknown.identity.table_hash.empty() && unknown.identity.state_format.empty() && unknown.identity.prefill_lineage.empty() &&
+              unknown.identity.reduction_plan.empty() && unknown.build.empty() && unknown.kernel.empty() && unknown.device.empty() && unknown.topology.empty(),
+              "pair unknown execution/asset/numerical fields remain empty");
+        check(unknown.digests == pr::Pairs{{"profile_fingerprint", pr::hex_identity(result.profile->fingerprint())}}, "pair host profile digest");
+        for (const char* contract : {"ds41-exact-v1", "ds41-expert-tp2-i1152-v1", "ds41-moe-relaxed-v1"}) {
+            pr::NumericalIdentity identity;
+            identity.arithmetic_contract = contract;
+            identity.prefill_lineage = "caller-admitted-lineage";
+            const auto receipt = pd::host_receipt(rc.app, result, identity);
+            check(receipt.identity.id() == identity.id() && receipt.identity.arithmetic_contract == contract, "preserve actual admitted pair identity");
+            check(receipt.witness() == "strix-engine-witness " + receipt.json() + "\n", "canonical pair host witness");
+        }
+    }
+    // A pair lever with both override routes: CLI > environment > profile > builtin.
+    static constexpr pr::Lever lever{"override", "TEST_OVERRIDE", "--override", {"", "1", ""}, "builtin",
+        pr::Kind::exact, {true, true, true}, {true, true, true}, "", "0", "host-test"};
+    const pr::Engine engine{"pair-test", "", std::span(&lever, 1)};
+    std::map<std::string, std::string> values;
+    pr::Inputs inputs;
+    inputs.env = [&](const char* key) -> const char* { const auto i = values.find(key); return i == values.end() ? nullptr : i->second.c_str(); };
+    check(pr::resolve(engine, inputs).find("override")->value == "builtin", "builtin precedence");
+    inputs.profile = pr::Name::fast;
+    check(pr::resolve(engine, inputs).find("override")->value == "1", "profile beats builtin");
+    values["TEST_OVERRIDE"] = "env";
+    check(pr::resolve(engine, inputs).find("override")->value == "env", "env beats profile");
+    inputs.cli = {{"override", "first"}, {"override", "last"}};
+    check(pr::resolve(engine, inputs).find("override")->value == "last", "last CLI beats env");
+    inputs.cli.clear(); values["TEST_OVERRIDE"] = "";
+    check(pr::resolve(engine, inputs).find("override")->status == pr::Status::explicit_env, "pair keeps explicit empty profile env");
+    // Every qualification combination, including provisional ahead of ready.
+    for (const bool ready : {false, true}) for (const bool runnable : {false, true})
+    for (const bool allow : {false, true}) for (const bool provisional : {false, true}) {
+        auto row = lever;
+        row.ready[1] = ready; row.runnable[1] = runnable; row.provisional[1] = provisional;
+        const pr::Engine test_engine{"pair-admission", "", std::span(&row, 1)};
+        pr::Inputs test_inputs; test_inputs.profile = pr::Name::fast; test_inputs.allow_pending = allow;
+        test_inputs.env = [](const char*) -> const char* { return nullptr; };
+        const auto resolution = pr::resolve(test_engine, test_inputs);
+        const auto expected = !ready && !((provisional || allow) && runnable) ? pr::Status::pending :
+            provisional ? pr::Status::provisional : ready ? pr::Status::set : pr::Status::unqualified;
+        check(resolution.find("override")->status == expected, "pair admission ready/runnable/allow/provisional");
+        check(resolution.find("override")->value == (expected == pr::Status::pending ? "builtin" : "1"), "pair refused column retains builtin");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -560,6 +631,7 @@ int main() {
     test_session_defaults();
     test_session_off_settings();
     test_profile();
+    test_common_adapter();
     if (failures != 0) {
         std::fprintf(stderr, "%d failure(s)\n", failures);
         return 1;

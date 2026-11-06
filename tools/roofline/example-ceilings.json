@@ -1,0 +1,25 @@
+{
+  "schema": "strix-roofline-ceilings/v1",
+  "normalization": {
+    "samples": 2,
+    "iterations_per_sample": 2,
+    "unit": "token"
+  },
+  "families": {
+    "weights": {
+      "kind": "bandwidth",
+      "work": 1,
+      "work_unit": "GB",
+      "rate": 100,
+      "rate_unit": "GB/s",
+      "owner": "weights"
+    },
+    "linears": {
+      "kind": "compute",
+      "work": 1,
+      "work_unit": "GFLOP",
+      "rate": 1,
+      "rate_unit": "TFLOP/s"
+    }
+  }
+}

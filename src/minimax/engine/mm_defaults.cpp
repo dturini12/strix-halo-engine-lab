@@ -4,6 +4,7 @@
 // MiniMax M3.1 defaults-on resolver: the table of default-ON items, the baseline master switch and the canonical
 // effective configuration (see mm_defaults.hpp).
 #include "minimax/engine/mm_defaults.hpp"
+#include "minimax/engine/route_identity.hpp"
 #include "minimax/serve/minimax_sched.hpp"
 #include "minimax/dspark/minimax_auto.hpp"
 
@@ -20,7 +21,9 @@
 #include <filesystem>
 #include <fstream>
 #ifdef _WIN32
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 #endif
 #include <set>
@@ -98,7 +101,7 @@ constexpr Item kItems[] = {
     {"pf_attend4", "STRIX_MM_PF_ATTEND4", "1", "0", "Prefill measurement: exact, pfall TTFT 1K -17 %, 8K -20 %"},
     {"pf_router_batch", "STRIX_MM_PF_ROUTER_BATCH", "1", "0", "Prefill measurement: exact, pfall TTFT 1K -17 %, 8K -20 %"},
     {"pf_mtfit", "STRIX_MMX_PREFILL_MTFIT", "1", "0", "Prefill measurement: exact, pfall TTFT 1K -17 %, 8K -20 %"},
-    {"pf_msa_rework", "STRIX_MM_PF_MSA_REWORK", "6", "0", "Prefill attention measurement: exact; mode 6 (tile corrections in the packed exp lanes) vs 5 8K in-process -1.6/0/0 %, mode 3 8K B/A 0.963 / 0.957 / 0.972"},
+    {"pf_msa_rework", "STRIX_MM_PF_MSA_REWORK", "7", "0", "Prefill attention measurement: exact; mode 7 (combine fused into the last chunk block) vs 6 attend -8.3 %/call at 28672:4096, TTFT bracketed in-process A/B vs mode 6 8K -5.0 % (-0.78 s), 16K -3.0 % (-0.93 s); 32K fresh process 6/7/6 + 7/6/7 -2.4 % (-1.59 s), result hash identical on both ranks; mode 6 (tile corrections in the packed exp lanes) vs 5 8K in-process -1.6/0/0 %, mode 3 8K B/A 0.963 / 0.957 / 0.972"},
     {"pf_idx_tile", "STRIX_MM_PF_IDX_TILE", "1", "0",
      "Prefill index measurement: exact (state/final rows identical), index scoring 8K -6.7 %, 32K -6.4 %; TTFT 8K -1.9 %, 32K -0.6 %, 1K neutral"},
     {"pf_idx_rows", "STRIX_MM_PF_IDX_ROWS", "64", "32",
@@ -173,18 +176,28 @@ std::vector<Resolved> resolve(const Lookup& env) {
     std::vector<Resolved> out;
     out.reserve(std::size(kItems));
     for (const Item& it : kItems) {
-        Resolved r;
-        r.item = &it;
-        if (const char* v = env(it.env); v != nullptr) {
-            r.value = v;
-            r.source = Source::env;
-        } else {
-            r.value = base ? it.off : it.on;
-            r.source = base ? Source::baseline : Source::on;
-        }
-        out.push_back(std::move(r));
+        // Empty item values are explicit in the legacy resolver too. Baseline's
+        // separate nonempty/not-"0" truthiness above remains MiniMax policy.
+        auto value = profile::resolve_default(it, base, env);
+        out.push_back({&it, std::move(value.value), value.source});
     }
     return out;
+}
+
+profile::ExecutionReceipt host_receipt(const Lookup& env) {
+    profile::ExecutionReceipt receipt;
+    receipt.engine = "minimax-m3.1";
+    receipt.implementation = "minimax-pair";
+    receipt.build = STRIX_MM_GU4_SCALAR ? "gu4_scalar=on" : "gu4_scalar=off";
+    // Declared in include/strix/minimax/engine.hpp: FP32 partials, then a
+    // fixed rank-order sum. This is distinct from any other engine's contract
+    // and does not identify the assets or a complete reduction/kernel plan.
+    receipt.identity.arithmetic_contract = "MiniMax M3.1 FP32 partials with fixed rank-order sum";
+    const char* prefill = env("STRIX_MM_PREFILL_IDENTITY");
+    receipt.identity.prefill_lineage = route::fp32_profile(prefill) ? "fp32" : "production";
+    // Kernel, device, topology, asset hashes, state format and the complete
+    // reduction plan are unknown at this host-only policy boundary.
+    return receipt;
 }
 
 void apply() {

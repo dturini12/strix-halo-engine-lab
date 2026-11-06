@@ -328,6 +328,20 @@ In a prompt group, gather the next segment's PLE rows on a stage thread into the
 - **Measured gain:** Inline PLE gather of a cold first 8x1024 group 183 vs 403 ms. 8x1024 makespan in two paired legs: 25.30 vs 25.19 s (within noise). Warm per-segment gathers are 10-50 ms, so the ceiling is about 1 % of a group.
 - **Implementation / evidence:** `src/hip_ple_launcher.hip` (`stage_serve`), `include/strix/ple_staged_gather.hpp`
 
+### Prompt-group size by load
+
+**Engine:** `qwen`. **Control:** `STRIX_PROMPT_BATCH_AUTO`, `STRIX_PROMPT_BATCH_AUTO_QUEUE`. **Default:** ON (threshold 1).
+
+An HTTP prompt group takes at most 4 blocks, so the first prompts of a burst finish sooner, unless every slot is busy and at least `STRIX_PROMPT_BATCH_AUTO_QUEUE` requests wait for one; then it fills the row budget as before.
+
+- **Preconditions:** HTTP batched server with prompt grouping on; no explicit `STRIX_PROMPT_BATCH_ROWS`.
+- **Automatic selection:** Every prompt group; the cap follows the slot and queue state when the group forms (`STRIX_PROMPT_BATCH_LOG=1` ends each group line in `idle cap 4` or `backlog`).
+- **Fallback notice:** None; scheduling only.
+- **Exactness evidence:** Token ids equal on vs off in every request of all 48 paired bursts (each block runs the same arithmetic in any group).
+- **Off switch:** STRIX_PROMPT_BATCH_AUTO=0
+- **Measured gain:** One Strix Halo node, 8 slots, 4 output tokens, 24 paired bursts per cell (fresh server per arm, order alternating over six turns), on vs STRIX_PROMPT_BATCH_AUTO=0. 8 x 1024 burst: first-token p50 8.62 vs 10.25 s (-21 %), mean completion 9.19 vs 11.22 s (-23 %), makespan +1.2 % (95 % CI -1.3 to +6.0 %, not resolved). 16 x 1024 burst (8 queued): first-token p50 12.63 vs 14.58 s (-15 %), mean completion 14.52 vs 15.51 s (-7.7 %), makespan +0.2 % (95 % CI -1.5 to +1.8 %). Threshold sweep (one turn): 3 or 9 queued requests did not shorten 10/12/16 x 1024 bursts, so the default is 1.
+- **Implementation / evidence:** `apps/hip_mtp_decode_bridge.hpp` (`run_prompt_group`), `apps/hip_http_serve.hpp` (queued-request hint)
+
 <a id="qwen-l1"></a>
 
 ### PLE page reclaim and prefetch admission
@@ -1416,8 +1430,10 @@ The prefill Engram projection runs a 48 x 64 LDS tile (6 x 16 accumulators per l
 - **Automatic selection:** Every prefill Engram piece (hip_deepseek41_prefill.hip) that meets the preconditions.
 - **Fallback notice:** Other views and row counts take enqueue_f16_rows silently (same bits).
 - **Exactness evidence:** Bitwise: every output byte equals enqueue_f16_rows (rows 1..8192 incl. tile edges 47/48/49/63/64/65/95/96/97, padded strides with guard values, 3 independent F16 weight matrices, BF16-rounded inputs with signed zeros); same per-lane chains (k = lane, lane + 32, ... ascending, separate multiply and add rounding, no contraction), same butterfly and storing lane. Compiler resources: 164 VGPR, no spill or scratch.
-- **Off switch:** STRIX_DS41_ENGRAM_F16_PF=0 (read on every call)
-- **Measured gain:** Isolated Engram projection (6144 -> 25600, event medians, interleaved arms, 3 weight copies) vs enqueue_f16_rows: rows 32 0.54x, 128 0.87x, 256 0.94x, 512 0.86x, 1024 0.86x (88.1 -> 75.8 ms), 2048 0.86x, 4096 0.86x, 8192 0.87x; 49..64 rows keep enqueue_f16_rows (64 rows: 1.16x). End-to-end TTFT not separately measured.
+- **Off switch:** STRIX_DS41_ENGRAM_F16_PF=0 (read on every call); STRIX_DS41_ENGRAM_PF_TILE=48 keeps the 48 x 64 tile at every row count
+- **Measured gain:** Isolated Engram projection (6144 -> 25600, event medians, interleaved arms, 3 weight copies) vs enqueue_f16_rows: rows 32 0.54x, 128 0.87x, 256 0.94x, 512 0.86x, 1024 0.86x (88.1 -> 75.8 ms), 2048 0.86x, 4096 0.86x, 8192 0.87x; 49..64 rows keep enqueue_f16_rows (64 rows: 1.16x). End-to-end TTFT not separately measured. With the separate form only (fused multiply-add off, graph capture, per-thread default stream), pieces of up to 2048 rows take a 48 x 32 tile of 512 threads (two workgroups resident per CU, 180 VGPR, no spill), same bits; separate-form timings: 1056 rows 0.998x, 2048 rows 0.992x of the 48 x 64 tile (3 rounds, 5-run medians); 8192 rows keep 48 x 64 (48 x 32 there 1.004x). STRIX_DS41_ENGRAM_PF_TILE=48 forces 48 x 64, =48x32 or =24 force those tiles (read per call).
+- **Exact fused multiply-add (48 x 64 tile):** Bitwise: fmaf(w, x, acc) equals acc + w * x when w is a finite F16 value and x is zero or a BF16 value with 2^-100 <= |x| < 2^101: the product is zero or has at most 19 significant bits and lies in 2^-124 .. 2^117, so it is exact and normal under any denormal mode (kernel built with IEEE denormals, float_denorm_mode_32 = float_denorm_mode_16_64 = 3). An infinite w gives the same infinity (or NaN against a zero x) in both forms; a NaN w gives NaN in both, payload bits may differ. A per-call scan flags any other x (Inf and NaN included) and the separate form runs instead; a stream under graph capture always takes the separate form. Gate: every output byte equal to enqueue_f16_rows and to STRIX_DS41_ENGRAM_PF_FMA=0 at rows 1..8192, forced tiles, and planted wide-x rows (2^-110, 2^110, subnormal products, non-BF16 values); scan classification asserted per category (signed zeros, 2^-100 and its BF16 neighbour, 2^101 and its BF16 neighbour, Inf, NaN, non-BF16 bits) at the first, middle and last element and with padded strides; full-mantissa x on which the unchecked fused form differs while every gated arm stays equal. Fused 48 x 64 kernel: 191 VGPR, no spill; 349 v_fmac / v_dual_fmac replace 304 multiplies and 281 adds. Off: STRIX_DS41_ENGRAM_PF_FMA=0 (read per call).
+- **Fused multiply-add gain:** Isolated Engram projection, 4 weight copies, interleaved arms reversed every round, 5-run medians, two runs: 8192 rows 642.9 -> 613.6 ms and 648.6 -> 620.3 ms (-4.5 / -4.4 %) vs STRIX_DS41_ENGRAM_PF_FMA=0; forced 48 x 64 tile at 2048 rows -3.5 / -1.5 %. Pieces up to 2048 rows take the fused 48 x 64 tile as well: vs the separate 48 x 32 tile, 1056 rows 0.0 / -3.8 / -3.7 %, 2048 rows -2.4 / -3.6 / -3.3 % (three rounds); the separate-only route (FMA=0, graph capture, per-thread default stream) keeps 48 x 32 there. The 48 x 32 tile keeps the separate form (its fused body reaches 192 VGPR and spills: +10..12 %). About -0.11 s per rank at 32K, extrapolated from the isolated timing (8192-row pieces per rank derived from the prefill dispatch code, ~2.44 s of Engram projection per rank). End-to-end TTFT not separately measured.
 - **Implementation / evidence:** [kernel](../src/hip_ds41_layer.hip), [gate and bench](../tests/hip_ds41_engram_f16_pf_tests.hip)
 
 <a id="ds-shared-grouped"></a>
@@ -2849,6 +2865,22 @@ Mode 5 evaluates two heads' probabilities in one packed exponential; mode 6 also
 - **Measured gain:** 8K TTFT in-process A/B/A vs mode 5: -1.6 / 0.0 / 0.0 % (not slower); producer fixture within noise at small row counts.
 - **Implementation / evidence:** [kernel](../src/minimax/attn/msa_fused.hip), [tests](../src/minimax/attn/msa_fused_tests.hip)
 
+<a id="mm-pf-msa-mode7"></a>
+
+### MSA prefill mode 7
+
+**Engine:** `minimax`. **Control:** `STRIX_MM_PF_MSA_REWORK`. **Default:** 7.
+
+Mode 6 writes per-chunk partials and combines them in a second launch; mode 7 runs the same producer and lets the last chunk block of each (row, group) take an atomic ticket and combine the partials itself, with the same expressions in the same ascending order, so the separate combine launch disappears.
+
+- **Preconditions:** Supported MSA prefill shapes (as mode 6).
+- **Automatic selection:** Resolver supplies 7 only when unset; explicit values win.
+- **Fallback notice:** As mode 6.
+- **Exactness evidence:** Exact: the fused MSA unit suite compares every partial, score, index and output byte of modes 0..7 (both PV paths, dense and sparse, scratch sizes, graph replay); prefill state and final rows identical on both ranks in a 6-vs-7 PAIR A/B.
+- **Off switch:** STRIX_MM_PF_MSA_REWORK=6 (previous default), =5, =3, =0 (original)
+- **Measured gain:** attend call -8.3 % at 28672 rows x 4096 keys (faster at every fixture shape); TTFT bracketed in-process A/B vs mode 6 8K -5.0 % (-0.78 s), 16K -3.0 % (-0.93 s); 32K fresh process 6/7/6 + 7/6/7 -2.4 % (-1.59 s), result hash identical on both ranks.
+- **Implementation / evidence:** [kernel](../src/minimax/attn/msa_fused.hip), [tests](../src/minimax/attn/msa_fused_tests.hip)
+
 <a id="mm-rank-pfx"></a>
 
 ### GPU-gated prefill exchange in the rank app
@@ -2966,6 +2998,21 @@ On sparse decode calls of four rows or more at 16K positions or more, one select
 - **Off switch:** STRIX_MM_SELECT_ONCE=0
 - **Measured gain:** Same-binary bench, index + attend per layer and rank, v3 / select once: 32K N8 455.3 / 436.0 and 453.2 / 433.5, 32K N4 241.5 / 237.1, 32K verify windows of 8 / 4 rows 220.4 / 206.4 and 141.0 / 136.0, 128K N8 1304.7 / 1286.2 us
 - **Implementation / evidence:** [resolver](../src/minimax/engine/mm_defaults.cpp), [MSA tests](../src/minimax/attn/msa_fused_tests.hip)
+
+<a id="mm-pfx-chunk"></a>
+
+### Prefill exchange chunk size 4 MiB
+
+**Engine:** `minimax`. **Control:** `STRIX_MM_PFX_CHUNK` (bytes, multiple of 64 in [64 KiB, 64 MiB], both ranks the same). **Default:** 4 MiB (was 1 MiB).
+
+The pair prefill exchange sends each message as a run of synchronous transport calls of one chunk each. At 1 MiB per call the exposed exchange wait at 4K implies about 35 Gb/s per direction; 4 MiB calls reach about 37. The chunk size only changes how the same bytes are cut into calls: same order, same CRC trailer per chunk, same received bytes.
+
+- **Preconditions:** Pair (two-rank) MiniMax prefill; both ranks run the same default or the same explicit value (the handshake checks it).
+- **Fallback notice:** 16 MiB measured no better than 4 MiB (1,024 tokens 2.465 s = 415.4 tok/s, 4,096 tokens 9.112 s = 449.5 tok/s, 8,192 tokens 13.900 s = 589.3 tok/s); at 8K the exchange is already hidden behind compute, so the chunk size does not change TTFT.
+- **Exactness evidence:** Pair prefill at 1K / 4K / 8K with chunks 1 / 16 / 4 / 1 MiB in fresh processes: prefill state and final-row digests identical in every arm on both ranks.
+- **Off switch:** STRIX_MM_PFX_CHUNK=1048576
+- **Measured gain:** TTFT 1,024 tokens 2.469 -> 2.423 s (414.8 -> 422.6 tok/s, -1.9 %), 4,096 tokens 9.168 -> 9.025 s (446.8 -> 453.9 tok/s, -1.5 %), 8,192 tokens 13.817 / 13.874 -> 13.874 s (592.9 / 590.5 -> 590.5 tok/s, unchanged)
+- **Implementation / evidence:** [exchange options](../src/minimax/pfx/pf_exchange.hpp), [exchange tests](../tests/hip_mm_pfx_tests.hip)
 
 <a id="mm-pf-idx-tile"></a>
 
@@ -3544,11 +3591,30 @@ the v2 chain (k ascending from +0, fmaf), so the result has the same bits as v2.
 - **Measured gain:** Two-node pair, alternating arms: MLA GEMM time per rank 0.715 -> 0.425 s at 8K (-41 %), 2.853 -> 1.628 s at 32K (-43 %); TTFT 8,192 tokens 15.34 -> 15.05 s (534 -> 544 tok/s, -1.9 %), 32,768 tokens 62.36 -> 60.91 s (525 -> 538 tok/s, -2.3 %)
 - **Implementation / evidence:** [resolver](../apps/glm_rank_defaults.hpp), [prefill kernels](../src/glm/prefill/glm_prefill.hip)
 
+<a id="glm-pf-dense-rows-v3"></a>
+
+### Prefill dense rows v3 (grouped projections)
+
+**Engine:** `glm`. **Control:** `STRIX_GLM_PF_DENSE_ROWS`. **Default:** 3.
+
+Up to three dense-row projections of the same input (KDA f_a / g_a / b, indexer wk / gate / weights_proj) run in one
+launch with a 128-row x 64-column tile, so x is read once per tile for all of them. Each output keeps the v2 chain
+(acc = +0, ascending k, fmaf with the same weight conversion). Single projections (router, KDA f_b / g_b) measured at
+parity and keep the v2 tile.
+
+- **Preconditions:** Exact chunked prefill.
+- **Automatic selection:** Unset resolves to 3; the engine default provides it; the resolver reports it. Explicit values win; values other than 1, 2 and 3 are rejected.
+- **Fallback notice:** None.
+- **Exactness evidence:** Device test v3 == v2 bitwise over every tile and the grouped production shapes (417 checks, 0 failures); logits bitwise equal on both ranks at 8K across v3 / v2 / v1.
+- **Off switch:** STRIX_GLM_PF_DENSE_ROWS=2 (v2) or 1 (v1)
+- **Measured gain:** TTFT at 8,192 tokens at parity with v2 within noise (14.29 vs 14.33 s; a second pair run 14.80 vs 14.72 s, medians of two runs; 14.49 s with v1). Grouped calls at 8192 rows: KDA 9.33 -> 6.77 ms, indexer 8.98 -> 6.62 ms; at 4096 rows 4.17 -> 2.89 ms and 4.14 -> 2.83 ms
+- **Implementation / evidence:** [resolver](../apps/glm_rank_defaults.hpp), [prefill kernels](../src/glm/prefill/glm_prefill.hip)
+
 <a id="glm-pf-dense-rows-v2"></a>
 
 ### Prefill dense rows v2
 
-**Engine:** `glm`. **Control:** `STRIX_GLM_PF_DENSE_ROWS`. **Default:** 2.
+**Engine:** `glm`. **Control:** `STRIX_GLM_PF_DENSE_ROWS=2`. **Default:** superseded by v3, which keeps the v2 tile for single projections.
 
 Exact dense-row GEMV tiles of the chunked prefill with a new schedule: 8 x 4 independent chains per thread, packed F16 /
 BF16 weight loads and 32- / 64-column tiles chosen by shape. Each output keeps its chain (acc = +0, ascending k, fmaf
@@ -3556,7 +3622,7 @@ with the same weight conversion). Calls with more than 4096 inputs (the 16384-lo
 `STRIX_GLM_PF_HC=1`) keep the v1 tile.
 
 - **Preconditions:** Exact chunked prefill.
-- **Automatic selection:** Unset resolves to 2; the engine default provides it; the resolver reports it. Explicit values win.
+- **Automatic selection:** Selected explicitly with 2; single projections use this tile under the default 3.
 - **Fallback notice:** None.
 - **Exactness evidence:** Device test v2 == v1 bitwise over the production shapes (80/80); logits and state bitwise equal v1 on both ranks of the pair at 1K and 8K.
 - **Off switch:** STRIX_GLM_PF_DENSE_ROWS=1
@@ -3711,6 +3777,27 @@ the chain's 24 outputs over three CTAs (same bits).
 - **Off switch:** STRIX_GLM_PF_HC_FUSE=0, or --baseline
 - **Measured gain:** Two-node pair TTFT, ABBA x2: 1K -1.1 %, 8K -1.3 %
 - **Implementation / evidence:** [resolver](../apps/glm_rank_defaults.hpp), [prefill kernels](../src/glm/prefill/glm_prefill.hip)
+
+<a id="glm-pf-sumexp"></a>
+
+### Prefill TP2 partial sum on load in the fused mHC expand
+
+**Engine:** `glm`. **Control:** `STRIX_GLM_PF_SUMEXP`, `STRIX_GLM_PF_HC_HOIST`. **Default:** 1, 1.
+
+The pipelined prefill seam no longer writes p0 + p1 back into the partial buffer before the fused expand + norm reads it.
+The exchange hands both partials (rank order) to a pair variant of the fused expand kernel, which forms y = p0 + p1 with
+the exchange's sum expression on load; the summed rows are never stored. The receive staging (or the remote half region)
+is released after the expand, so the next exchange still overlaps the following FFN / attention. `STRIX_GLM_PF_HC_HOIST`
+places the expand's loads ahead of its dependent steps (`=2` adds restrict qualifiers); every expression and its order
+are unchanged.
+
+- **Preconditions:** Exact chunked prefill with async half regions and the fused `STRIX_GLM_PF_HC_FUSE=1` form.
+- **Automatic selection:** Unset resolves to 1 for both; the resolver reports `STRIX_GLM_PF_SUMEXP`. Explicit values win; other values are rejected.
+- **Fallback notice:** None.
+- **Exactness evidence:** Pair kernel bitwise equal to the sum followed by the fused expand over the device stress set (35 checks, 0 failures); hoist placements 0 / 1 / 2 bitwise (47 checks, 0 failures); pair logits bitwise on both ranks at 1K, 8K and 32K.
+- **Off switch:** STRIX_GLM_PF_SUMEXP=0 (sum, then the fused expand, previous seam order); STRIX_GLM_PF_HC_HOIST=0; --baseline
+- **Measured gain:** Seam sum + fused expand 4.26 -> 3.91 ms per call (-8.2 %); 8,192-token TTFT unchanged within noise (14.34-14.40 s on both arms)
+- **Implementation / evidence:** [resolver](../apps/glm_rank_defaults.hpp), [prefill kernels](../src/glm/prefill/glm_prefill.hip), [engine seam](../src/glm/engine/engine.hip)
 
 <a id="glm-pf-mixnorm"></a>
 
@@ -3894,6 +3981,25 @@ Unit-file reads in flight in a three-tier open; `auto` picks 4 / 6 / 8 from the 
 - **Off switch:** `--tier-disk-queue 1`
 - **Measured gain:** Auto vs 1 at about 76 % file share (24 GiB VRAM + 32 GiB RAM) was never slower in the latest measured decode cell means: 1K cold / warm +42 / +35 %, 8K cold / warm +33 / +16 %. Earlier one-drive cells were +9..+42 % in seven of eight (remaining -3.4 % traced to drive read phases); two-drive stripes +26..+38 %. Single loads vary up to 2x, so the gain size is uncertain. At about 61 % (48 GiB + 32 GiB), one earlier night observed cold-1K decode -32 % against the queue-1 mean; warm 1K +3 %, cold 8K +7 %, warm 8K +1 %. A later set at the same budget reversed the cold-1K result: auto +8.4 % pooled, every auto arm faster. The 70 % cut remains a conservative empirical cutoff: 61 % stays at 1. Full card (about 1-4 % at tile 2048) tied in TTFT (8K +0.6..+2 %, 32K equal), so it stays at 1.
 - **Implementation / evidence:** [GLM RTX guide](../src/glm/rtxpf/README.md)
+
+## Qwen RTX PRO standalone
+
+<a id="qwen-rtx-prefix-cache"></a>
+
+### Prompt prefix cache
+
+**Engine:** `qwen-rtx`. **Control:** `--prefix-cache`, `STRIX_QRTX_PREFIX_CACHE`. **Default:** ON.
+
+`strix-cuda-qwen-serve` keeps exact checkpoints of the prompt state in blocks of 256 tokens; a request restores
+the longest cached prefix of its token ids and prefills only the rest.
+
+- **Preconditions:** `strix-cuda-qwen-serve`; a request whose token ids share at least one 256-token block with an earlier prompt in the same process and the same compatibility key.
+- **Automatic selection:** On for every request; checkpoints at the last block boundary before the final prompt token and every 16,384 tokens, in pinned host RAM (`--prefix-cache-host-mb`, default min(8192 MiB, 25 % of available RAM)), LRU-evicted. A capture that does not fit is skipped.
+- **Fallback notice:** A miss, a key mismatch or a skipped capture runs the full prefill; a request never fails because of the cache.
+- **Exactness evidence:** `qwen_prefix_cache_e2e` 16/16: state digests, 64 ids and logit hashes of a fresh prefill equal checkpoint-continue, restore into another session, changed suffix and changed boundary token, sync and overlapped prefill. HTTP on vs off, 48-50K-token agent turns: outputs identical 8/8.
+- **Off switch:** `--prefix-cache off`; `STRIX_QRTX_PREFIX_CACHE=0`
+- **Measured gain:** No throughput figure published yet. Follow-up agent turns report 48,128-49,664 restored tokens in `cached_tokens`.
+- **Implementation / evidence:** [Qwen RTX serve guide](models/qwen3.8/rtx-serve.md#prompt-prefix-cache), [cache](../apps/cuda_qwen_prefix_cache.hpp)
 
 ## Platform (kernel)
 

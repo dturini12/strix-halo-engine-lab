@@ -123,9 +123,7 @@ inline std::string prefill_identity_name(unsigned mask) {
 inline std::string prefill_identity_name() { return prefill_identity_name(prefill_options_active()); }
 // FNV-1a 64 of the identity name.
 inline std::uint64_t prefill_identity_hash(unsigned mask) {
-    std::uint64_t h = 14695981039346656037ULL;
-    for (const char c : prefill_identity_name(mask)) { h ^= static_cast<unsigned char>(c); h *= 1099511628211ULL; }
-    return h;
+    return host_fnv::text(prefill_identity_name(mask), 14695981039346656037ULL);
 }
 inline std::uint64_t prefill_identity_hash() { return prefill_identity_hash(prefill_options_active()); }
 

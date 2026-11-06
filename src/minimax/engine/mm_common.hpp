@@ -8,7 +8,6 @@
 #include <map>
 #include <stdexcept>
 #include <string>
-#include <variant>
 #include <vector>
 
 namespace strix::minimax::engine::detail {
@@ -18,19 +17,6 @@ constexpr unsigned kLayers = 60, kFirstMoe = 3, kExperts = 128, kTopE = 4;
 constexpr float kEps = 1e-6F, kAlpha = 1.702F, kLimit = 7.0F;
 constexpr std::uint64_t kVocab = 200064, kVocabPad = 782 * 128;  // rank 0's vocabulary share (H128 blocks)
 inline const std::string kP = "language_model.model.";
-
-// ---------------------------------------------------------------- minimal JSON (safetensors headers, index)
-struct Json;
-using JsonObj = std::map<std::string, Json>;
-using JsonArr = std::vector<Json>;
-struct Json {
-    std::variant<std::nullptr_t, double, std::string, JsonArr, JsonObj> v;
-    const JsonObj& obj() const { return std::get<JsonObj>(v); }
-    const JsonArr& arr() const { return std::get<JsonArr>(v); }
-    const std::string& str() const { return std::get<std::string>(v); }
-    double num() const { return std::get<double>(v); }
-};
-Json parse_json(const char* begin, const char* end);
 
 // ---------------------------------------------------------------- safetensors pack, O_DIRECT reads
 struct TensorInfo {

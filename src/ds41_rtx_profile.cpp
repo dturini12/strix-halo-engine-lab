@@ -1,4 +1,4 @@
-#include "strix/ds41_rtx_profile.hpp"
+#include "strix/profiles/ds41_rtx.hpp"
 
 #include <cstdlib>
 #include <stdexcept>
@@ -81,7 +81,7 @@ constexpr Lever kTable[] = {
      .source = "pending: quality qualification (DS FP16 dense prefill bands); the service does not take --profile yet"},
 };
 
-const char* environment(const Lookup& env, const char* name) { return env ? env(name) : std::getenv(name); }
+using strix::profile::environment;
 
 void escape(std::string& out, std::string_view text) {
     out += '"';
@@ -125,22 +125,6 @@ const char* status_name(Status status) {
     case Status::baseline_env: return "baseline-env";
     case Status::pending: return "pending";
     case Status::unqualified: return "unqualified";
-    }
-    return "unknown";
-}
-const char* kind_name(Kind kind) { return kind == Kind::exact ? "exact" : "bit-changing"; }
-
-Name parse(std::string_view value) {
-    if (value == "default") return Name::standard;
-    if (value == "fast") return Name::fast;
-    if (value == "quality") return Name::quality;
-    throw std::invalid_argument("--profile must be default, fast or quality (got '" + std::string(value) + "')");
-}
-const char* name(Name profile) {
-    switch (profile) {
-    case Name::standard: return "default";
-    case Name::fast: return "fast";
-    case Name::quality: return "quality";
     }
     return "unknown";
 }
@@ -208,6 +192,15 @@ std::string Resolution::json(const std::function<std::string(std::string_view)>&
     return out;
 }
 
+strix::profile::ExecutionReceipt Resolution::host_receipt(strix::profile::NumericalIdentity identity) const {
+    strix::profile::ExecutionReceipt out;
+    out.engine = "deepseek41-rtx";
+    out.implementation = app_name(app);
+    out.identity = std::move(identity);
+    out.digests.emplace_back("profile_json_fnv1a64", strix::profile::hex_identity(strix::host_fnv::text(json())));
+    return out;
+}
+
 Selection select(const Inputs& inputs) {
     Selection s;
     std::optional<Name> cli;
@@ -269,28 +262,34 @@ Resolution resolve(Name profile, bool allow_pending, App app, const Inputs& inpu
         }
         const char* own = lever.env.empty() ? nullptr : environment(inputs.env, std::string(lever.env).c_str());
         const auto& wanted = lever.value[column];
-        if (cli) {
+        // Adapt legacy RTX policy before using the common value selector: empty
+        // own variables are ignored, booleans map to on/off, and environment
+        // baseline overrides the own variable. CLI ordering was resolved above.
+        const std::string row_name(lever.name), row_env(lever.env), row_on(wanted);
+        const strix::profile::DefaultItem row{row_name.c_str(), row_env.c_str(), row_on.c_str(), "off", "",
+                                              true, lever.baseline};
+        const Lookup own_env = [&](const char*) -> const char* {
+            if ((env_baseline && lever.baseline) || !own || !*own) return nullptr;
+            return std::string_view(own) == "0" ? "off" : "on";
+        };
+        const auto selected = strix::profile::resolve_default(row, env_baseline, own_env,
+            cli ? std::optional<std::string_view>(entry.value) : std::nullopt);
+        entry.value = selected.value;
+        if (selected.source == strix::profile::DefaultSource::cli) {
             entry.status = cli_baseline ? Status::baseline_cli : Status::explicit_cli;
-        } else if (env_baseline && lever.baseline) {
-            entry.value = "off";
+        } else if (selected.source == strix::profile::DefaultSource::baseline) {
             entry.status = Status::baseline_env;
-        } else if (own && *own) {
-            entry.value = std::string_view(own) == "0" ? "off" : "on";
+        } else if (selected.source == strix::profile::DefaultSource::env) {
             entry.status = Status::explicit_env;
         } else if (wanted.empty()) {
             continue;  // the profile leaves it alone
-        } else if (!lever.ready[column]) {
-            entry.wanted = std::string(wanted);
-            if (allow_pending && lever.runnable[column]) {
-                entry.value = std::string(wanted);  // benchmarks only: the receipt is stamped unqualified
-                entry.status = Status::unqualified;
-            } else {
-                entry.value = std::string(lever.builtin);  // refused: the builtin form runs
-                entry.status = Status::pending;
-            }
         } else {
-            entry.value = std::string(wanted);
-            entry.status = Status::profile;
+            const auto admission = strix::profile::admit_column(lever.ready[column], lever.runnable[column], allow_pending);
+            if (admission != strix::profile::Status::set) {
+                entry.wanted = std::string(wanted);
+                entry.status = admission == strix::profile::Status::pending ? Status::pending : Status::unqualified;
+                if (entry.status == Status::pending) entry.value = std::string(lever.builtin);
+            }
         }
         out.entries.push_back(std::move(entry));
     }

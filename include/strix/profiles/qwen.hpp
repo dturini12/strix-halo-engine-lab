@@ -1,4 +1,6 @@
 #pragma once
+#include "strix/engine_profile.hpp"
+#include "strix/prefill_identity.hpp"
 #include <array>
 #include <cstdlib>
 #include <functional>
@@ -12,20 +14,14 @@
 #include "strix/serve/json.hpp"
 
 namespace strix::qwen::profile {
-enum class Name : unsigned { standard, fast, quality };
-enum class Kind { exact, bit_changing, pack };
-struct Lever {
-    std::string_view name, env, option;
-    std::array<std::string_view, 3> value;
-    std::string_view builtin;
-    Kind kind;
-    std::array<bool, 3> ready, runnable;
-    std::string_view target, off, source;
-    // The existing CLI parser owns validation and typed precedence for this row.
-    bool native_option = false;
-    // Selected by this profile ahead of qualification; still requires runnable code.
-    std::array<bool, 3> provisional{};
-};
+using ::strix::profile::Name;
+using ::strix::profile::Kind;
+using ::strix::profile::Status;
+using ::strix::profile::Lever;
+using ::strix::profile::Entry;
+using ::strix::profile::name;
+using ::strix::profile::kind_name;
+using ::strix::profile::status_name;
 #include "strix/qwen_profile_table.hpp"
 inline std::span<const Lever> levers() { return table; }
 inline Name parse(std::string_view value) {
@@ -34,44 +30,6 @@ inline Name parse(std::string_view value) {
     if (value == "quality") return Name::quality;
     throw std::invalid_argument("profile must be default, fast or quality");
 }
-inline const char* name(Name value) {
-    switch (value) {
-    case Name::standard: return "default";
-    case Name::fast: return "fast";
-    case Name::quality: return "quality";
-    }
-    return "unknown";
-}
-enum class Status { set, explicit_env, explicit_cli, builtin, pending, unqualified, off, provisional };
-inline const char* status_name(Status value) {
-    switch (value) {
-    case Status::set: return "profile";
-    case Status::explicit_env: return "explicit-env";
-    case Status::explicit_cli: return "explicit-cli";
-    case Status::builtin: return "builtin";
-    case Status::pending: return "pending";
-    case Status::unqualified: return "unqualified";
-    case Status::off: return "off";
-    case Status::provisional: return "provisional";
-    }
-    return "unknown";
-}
-inline const char* kind_name(Kind value) {
-    switch (value) {
-    case Kind::exact: return "exact";
-    case Kind::bit_changing: return "bit-changing";
-    case Kind::pack: return "pack";
-    }
-    return "unknown";
-}
-struct Entry {
-    const Lever* lever;
-    std::string value;
-    Status status;
-    std::string target;
-    bool cli_override = false;
-    std::string reason;
-};
 struct Resolution {
     Name profile = Name::standard;
     std::vector<Entry> entries;
@@ -137,16 +95,14 @@ struct Resolution {
         return out.dump();
     }
 };
-using Lookup = std::function<const char*(const char*)>;
-using Pairs = std::vector<std::pair<std::string, std::string>>;
+using ::strix::profile::Lookup;
+using ::strix::profile::Pairs;
 struct Inputs {
     Pairs cli;
     Lookup env;
     bool allow_pending = false;
 };
-inline const char* environment(const Lookup& env, const std::string& key) {
-    return env ? env(key.c_str()) : std::getenv(key.c_str());
-}
+using ::strix::profile::environment;
 // Export provenance survives a future re-exec. A changed inherited value
 // is explicit again; matching profile exports retain their original status.
 inline std::string marker_key(const Lever& lever) { return "STRIX_QWEN_PROFILE_OWNED_" + std::string(lever.name); }
@@ -166,10 +122,10 @@ inline Resolution resolve(Name profile, const Inputs& inputs = {}, std::span<con
         bool inherited = false;
         if (env && !cli && !wanted.empty() && std::string_view(env) == wanted) {
             const char* owned = environment(inputs.env, marker_key(lever));
-            const auto status = lever.provisional[column] ? Status::provisional :
-                lever.ready[column] ? Status::set : Status::unqualified;
+            const auto status = ::strix::profile::admit_column(lever.ready[column], lever.runnable[column], allow_pending,
+                lever.provisional[column]);
             inherited = owned && std::string_view(owned) == marker(profile, status, env) &&
-                (lever.ready[column] || ((lever.provisional[column] || allow_pending) && lever.runnable[column]));
+                (status != Status::pending);
         }
         Entry entry{&lever, std::string(lever.builtin), Status::builtin, {}, false, {}};
         if (cli || (env && !inherited)) {
@@ -183,27 +139,23 @@ inline Resolution resolve(Name profile, const Inputs& inputs = {}, std::span<con
                 throw std::invalid_argument(std::string(lever.env.empty() ? lever.option : lever.env) + "=" + entry.value +
                     " is not in this build (" + std::string(lever.source) + ")");
         } else if (wanted.empty()) continue;
-        else if (!lever.ready[column] && !((lever.provisional[column] || allow_pending) && lever.runnable[column])) {
+        else if (::strix::profile::admit_column(lever.ready[column], lever.runnable[column], allow_pending,
+                 lever.provisional[column]) == Status::pending) {
             entry.status = Status::pending;
             entry.target = std::string(lever.target.empty() ? wanted : lever.target);
         } else {
             entry.value = std::string(wanted);
-            entry.status = lever.provisional[column] ? Status::provisional : !lever.ready[column] ? Status::unqualified :
-                wanted == lever.builtin ? Status::builtin : Status::set;
+            entry.status = ::strix::profile::admit_column(lever.ready[column], lever.runnable[column], allow_pending,
+                lever.provisional[column]);
+            if (entry.status == Status::set && wanted == lever.builtin) entry.status = Status::builtin;
         }
         out.entries.push_back(std::move(entry));
     }
     return out;
 }
-using Export = std::function<bool(const char*, const char*)>;
+using ::strix::profile::Export;
+using ::strix::profile::export_environment;
 using Erase = std::function<bool(const char*)>;
-inline bool export_environment(const char* key, const char* value) {
-#ifdef _WIN32
-    return _putenv_s(key, value) == 0;
-#else
-    return ::setenv(key, value, 1) == 0;
-#endif
-}
 inline bool erase_environment(const char* key) {
 #ifdef _WIN32
     return _putenv_s(key, "") == 0;
@@ -265,5 +217,20 @@ inline bool take_option(int argc, char** argv, int& i, std::optional<Name>& prof
         profile = parse(value);
     } else inputs.cli.emplace_back(lever->name, value);
     return true;
+}
+// Host metadata only: callers attach verified assets, execution provenance and
+// observed digests later. A compiled/native lineage must be supplied by its owner;
+// the product profile and the prefill option name are not a compiled lineage.
+inline ::strix::profile::ExecutionReceipt host_receipt(const NumericalProfilePair& pair,
+        unsigned prefill_mask, bool gsq, std::string_view prefill_lineage = {}) {
+    ::strix::profile::ExecutionReceipt receipt;
+    receipt.engine = "qwen";
+    receipt.identity.arithmetic_contract = "qwen;decode=" + std::string(numerical_profile_name(pair.decode)) +
+        ";prefill=" + std::string(numerical_profile_name(pair.prefill)) +
+        ";fast_components=" + std::to_string(pair.fast_components) +
+        ";prefill_options=" + prefill_identity_name(prefill_mask) +
+        ";arithmetic_identity=" + ::strix::profile::hex_identity(prefill_arithmetic_identity(pair, prefill_mask, gsq));
+    receipt.identity.prefill_lineage = prefill_lineage;
+    return receipt;
 }
 } // namespace strix::qwen::profile

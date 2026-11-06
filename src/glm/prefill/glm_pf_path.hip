@@ -248,11 +248,12 @@ public:
             pack_qkv_kernel<<<dim3((C + 255) / 256, R), 256, 0, c.stream>>>(tq_, tk_, tv_, qkv_, C, R);
             ok(hipGetLastError(), "pack_qkv");
         }
-        dense_rows(x, w.f_a, D::WType::F16, kHidden, 0, kKdaDim, ta_, R, c.stream);
+        {  // the three projections of x share one launch under dense v3 (v1 / v2 run them one by one); same bits
+            const DenseProj px[3] = {{w.f_a, 0, kKdaDim, ta_}, {w.g_a, 0, kKdaDim, tb128_}, {w.b, 0, H, b_}};
+            dense_rows_group(x, D::WType::F16, kHidden, px, 3, R, c.stream);
+        }
         dense_rows(ta_, w.f_b, D::WType::F16, kKdaDim, 0, C, f_, R, c.stream);
-        dense_rows(x, w.g_a, D::WType::F16, kHidden, 0, kKdaDim, tb128_, R, c.stream);
         dense_rows(tb128_, w.g_b, D::WType::F16, kKdaDim, 0, C, g_, R, c.stream);
-        dense_rows(x, w.b, D::WType::F16, kHidden, 0, H, b_, R, c.stream);
         const D::KdaDev kd{H, w.conv, w.A_log, w.dt_bias, w.o_norm};
         float* S = st.S + static_cast<std::size_t>(slot) * H * kKdaDim * kKdaDim;
         float* cv = st.conv + static_cast<std::size_t>(slot) * 3 * C * 3;
@@ -277,10 +278,11 @@ public:
         const D::DsaSlot sl{st.latent + static_cast<std::size_t>(slot) * st.cap * kKvLora, st.ikey + static_cast<std::size_t>(slot) * st.cap * kIdxDim,
                             st.igate + static_cast<std::size_t>(slot) * st.cap * kIdxDim,
                             st.pooled + static_cast<std::size_t>(slot) * (st.cap / kKpool) * kIdxDim, static_cast<unsigned>(st.cap)};
-        dense_rows(x, w.wk, D::WType::F16, kHidden, 0, kIdxDim, key_, R, c.stream);
-        dense_rows(x, w.gate, D::WType::F16, kHidden, 0, kIdxDim, gate_, R, c.stream);
+        {  // wk, gate and weights_proj of x in one dense v3 launch (wh_ is read only by the indexer below); same bits
+            const DenseProj px[3] = {{w.wk, 0, kIdxDim, key_}, {w.gate, 0, kIdxDim, gate_}, {w.weights_proj, 0, kIdxHeads, wh_}};
+            dense_rows_group(x, D::WType::F16, kHidden, px, 3, R, c.stream);
+        }
         dsa_append_rows(sl, t0, lat_, key_, gate_, iw, c.flag, R, c.stream);
-        dense_rows(x, w.weights_proj, D::WType::F16, kHidden, 0, kIdxHeads, wh_, R, c.stream);
         indexer_select_rows(sl, t0, qI_, wh_, keys_, static_cast<unsigned>(cap_ / kKpool), tok_, ntok_, R, c.stream);
         mla_attention_rows(sl, tok_, ntok_, q_, w.kv_b, H, qt_, e_, ob_, o_, R, c.stream);
         linear(c, w.o, o_, y, R, H * kMlaDim, kHidden);
