@@ -13,6 +13,13 @@ budget: the rows of the T-row block owner, or `STRIX_PROMPT_BATCH_ROWS` when it 
 groups. A group of two or more blocks runs as one segmented prefill; a lone block or serial rows run alone. The
 decode cycle of the requests past their prompt follows each prompt step as before (prefill and decode are not fused).
 
+Group size by load (`STRIX_PROMPT_BATCH_AUTO`, default on; `=0` off): a group takes at most 4 blocks, so the first
+prompts of a burst finish sooner, unless every slot is busy and at least `STRIX_PROMPT_BATCH_AUTO_QUEUE` requests
+(default 1) wait for one (backlog): then a group fills the whole row budget as before, so throughput at saturation is
+unchanged. Scheduling only: a block's arithmetic is the same in any group, so tokens are identical. An explicit
+`STRIX_PROMPT_BATCH_ROWS` keeps a fixed row budget and turns the load rule off. Measured (One Strix Halo node, 8 slots, 4 output tokens, 24 paired bursts per cell (fresh server per arm, order alternating over six turns), on vs STRIX_PROMPT_BATCH_AUTO=0): 8 x 1024 burst: first-token p50 8.62 vs 10.25 s (-21 %), mean completion 9.19 vs 11.22 s (-23 %), makespan +1.2 % (95 % CI -1.3 to +6.0 %, not resolved); 16 x 1024 burst (8 queued): first-token p50 12.63 vs 14.58 s (-15 %), mean completion 14.52 vs 15.51 s (-7.7 %), makespan +0.2 % (95 % CI -1.5 to +1.8 %). Token ids equal in every pair. A higher threshold (3 or 9 queued requests) did not shorten 10/12/16 x 1024 bursts. With `STRIX_PROMPT_BATCH_LOG=1` each
+group line ends in `idle cap 4` or `backlog`.
+
 ## Segmented prefill
 
 `execute_known_prefix_prefill_segments_eager` runs the blocks of several sessions over consecutive rows of one tiled
@@ -42,6 +49,8 @@ to the prompt receipt next to the state digest).
 | Switch | Effect |
 | --- | --- |
 | `STRIX_PROMPT_BATCH=0` | Run every prompt unit alone (default: group the running prompts' blocks) |
+| `STRIX_PROMPT_BATCH_AUTO=0` | Always fill the row budget (default: at most 4 blocks per group unless requests wait for a slot) |
+| `STRIX_PROMPT_BATCH_AUTO_QUEUE=N` | Queued requests that count as backlog for the load rule (default 1) |
 | `STRIX_PROMPT_BATCH_ROWS=N` | Row budget of a group; above T, a dedicated group owner of N rows (multiple of 8, up to 8192) |
 | `STRIX_PROMPT_BATCH_SHARED=list` | Families run once for all segments (default `hc,router,moe,elementwise`) |
 

@@ -1,0 +1,95 @@
+# Descriptive checkpoint template. Qwen adapter code owns formulas, tensor-name
+# mapping, tokenizer/input processing and state transitions. This file does not
+# select schedules, enable YaRN or supply runtime identity/receipt text.
+schema = "strix-model/v1"
+name = "qwen3.8-flash-next"
+
+[source]
+format = "gguf"
+architecture = "qwen4exp"
+pack = "Q4_K_XL"
+
+[dims]
+vocab = 248320
+hidden = 2560
+max_context = 262144
+layers = 48
+n_heads = 24
+n_kv_heads = 2
+head_dim = 256
+
+[attention]
+full_interval = 4
+qsa_layers = 12
+gdn_layers = 36
+pattern = ["gdn", "gdn", "gdn", "qsa"]
+
+[gdn]
+key_heads = 16
+key_head_dim = 128
+value_heads = 48
+value_head_dim = 128
+conv_kernel = 4
+output_gate_sigmoid = true
+qk_l2norm = true
+qk_l2_epsilon = 1e-6
+conv_silu = true
+
+[indexer]
+n_heads = 4
+kv_heads = 1
+head_dim = 128
+budget = 2048
+compress_ratio = 4
+
+[rope]
+partial = 0.25
+theta = 10000000.0
+dimension = 64
+sections = [11, 11, 10]
+original_max = 262144
+interleaved = true
+
+[moe]
+intermediate = 640
+shared_intermediate = 640
+experts = 512
+top_k = 10
+norm_topk_probability = true
+
+[ple]
+layer_1based = 2
+embed_dim = 2560
+conv_kernel_size = 4
+ngram_size = 3
+heads_per_ngram = 8
+ngram_vocab_size_base = 20000000
+ngram_vocab_divisor = 128
+ngram_hash_seed = 1234
+eos_token_id = 248044
+
+[hc]
+count = 4
+lowrank = 320
+
+[mtp]
+full_attention_layers = 1
+use_dedicated_embeddings = false
+hidden_state_source_layer_explicit = false
+
+[storage]
+bytes_bf16 = 2
+bytes_fp32 = 4
+attention_kv = "bf16"
+
+[norm]
+rms_epsilon = 1e-6
+
+# Format census of the shipped pack, not a universal type for every tensor.
+# Tensor-role dispatch and the layer-specific exceptions stay in the adapter.
+[formats]
+expert_gate_up = ["q4_k", "q5_k"]
+expert_down = ["q5_1", "q8_0"]
+dense_projection = "q8_0"
+normalization = "f32"
+index_projection = "bf16"

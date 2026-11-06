@@ -1,0 +1,20 @@
+{
+  "schema": "strix-roofline-map/v1",
+  "kernel_column": "KernelName",
+  "time": {
+    "unit": "ns",
+    "kind": "total",
+    "duration_column": "DurationNs"
+  },
+  "rules": [
+    {
+      "pattern": "weight_.*",
+      "family": "weights"
+    },
+    {
+      "pattern": "gemm",
+      "family": "linears"
+    }
+  ],
+  "unknown": "error"
+}

@@ -19,6 +19,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <type_traits>
 
 #ifdef _WIN32
 int setenv(const char* key, const char* value, int overwrite) { if (!overwrite && std::getenv(key)) return 0; return ::_putenv_s(key, value); }
@@ -119,12 +120,14 @@ const std::map<std::string, std::string> kFormer = {
 };
 
 void test_table() {
+    static_assert(std::is_same_v<md::Item, strix::profile::DefaultItem>);
     std::set<std::string> envs, names;
     for (const md::Item& it : md::items()) {
         check(envs.insert(it.env).second, std::string("unique env ") + it.env);
         check(names.insert(it.name).second, std::string("unique name ") + it.name);
         check(std::strcmp(it.on, it.off) != 0, std::string("on != off for ") + it.env);
         check(std::strlen(it.receipt) > 10, std::string("receipt for ") + it.env);
+        check(it.app_sets && it.in_baseline, std::string("export and baseline membership for ") + it.env);
         const auto f = kFormer.find(it.env);
         check(f != kFormer.end() && f->second == it.off, std::string("off value is the former path for ") + it.env);
     }
@@ -164,11 +167,61 @@ void test_off_switches() {
             if (x.item == &it) check(x.value == it.off && x.source == md::Source::env, std::string(it.env) + " off");
             else check(x.value == x.item->on, std::string(it.env) + " off leaves " + x.item->env + " on");
         }
-        const auto off_lines = lines(md::effective_config(md::Cli{}, lookup(off)));
-        std::size_t diff = 0;
-        for (const auto& l : off_lines) if (!l.starts_with("session_")) diff += on_lines.count(l) == 0 ? 1 : 0;
-        check(diff == 1 && off_lines.count(std::string(it.env) + "=" + it.off) == 1, std::string(it.env) + " off changes one line");
+        for (const char* app : {"rank", "serve"}) {
+            md::Cli cli; cli.app = app;
+            const auto off_lines = lines(md::effective_config(cli, lookup(off)));
+            check(off_lines.count(std::string(it.env) + "=" + it.off) == 1, std::string(app) + ": " + it.env + " off printed");
+            if (cli.app == "rank") {
+                std::size_t diff = 0;
+                for (const auto& l : off_lines) if (!l.starts_with("session_")) diff += on_lines.count(l) == 0 ? 1 : 0;
+                check(diff == 1, std::string(it.env) + " off changes one rank line");
+            }
+        }
     }
+}
+
+void test_resolution_sources() {
+    const EnvMap none;
+    for (const auto& x : md::resolve(lookup(none)))
+        check(x.value == x.item->on && x.source == md::Source::on, std::string("default source: ") + x.item->env);
+    // Every row independently: explicit ON, OFF, empty and arbitrary strings
+    // override baseline; validation/admission belongs to the existing readers.
+    for (const auto& it : md::items()) {
+        for (const char* value : {it.on, it.off, "", "explicit-host-value"}) {
+            for (const bool base : {false, true}) {
+                EnvMap env{{it.env, value}};
+                if (base) env[md::kBaselineEnv] = "1";
+                for (const auto& x : md::resolve(lookup(env))) {
+                    if (x.item == &it)
+                        check(x.value == value && x.source == md::Source::env, std::string("explicit source: ") + it.env);
+                    else
+                        check(x.value == (base ? x.item->off : x.item->on) &&
+                              x.source == (base ? md::Source::baseline : md::Source::on), std::string("isolated source: ") + x.item->env);
+                }
+            }
+        }
+    }
+}
+
+void test_host_receipt() {
+    const EnvMap none, base{{md::kBaselineEnv, "1"}}, fp32{{"STRIX_MM_PREFILL_IDENTITY", "fp32"}},
+        other{{"STRIX_MM_PREFILL_IDENTITY", "FP32"}};
+    const auto receipt = md::host_receipt(lookup(none));
+    check(receipt.engine == "minimax-m3.1" && receipt.implementation == "minimax-pair", "host receipt engine route");
+    check(receipt.build == "gu4_scalar=on" || receipt.build == "gu4_scalar=off", "host receipt compiled addressing switch");
+    check(receipt.identity.arithmetic_contract == "MiniMax M3.1 FP32 partials with fixed rank-order sum", "separate MiniMax arithmetic contract");
+    check(receipt.identity.prefill_lineage == "production", "production prefill lineage");
+    check(receipt.identity.model_sha256.empty() && receipt.identity.pack_hash.empty() && receipt.identity.table_hash.empty() &&
+          receipt.identity.state_format.empty() && receipt.identity.reduction_plan.empty(), "unknown numerical identities stay empty");
+    check(receipt.kernel.empty() && receipt.device.empty() && receipt.topology.empty() && receipt.digests.empty(), "no host execution/device/digest claims");
+    check(receipt.json() == md::host_receipt(lookup(base)).json(), "baseline does not invent another arithmetic contract");
+    check(receipt.identity.id() != md::host_receipt(lookup(fp32)).identity.id(), "FP32 prefill has a separate lineage");
+    check(md::host_receipt(lookup(fp32)).identity.prefill_lineage == "fp32", "explicit FP32 lineage");
+    check(receipt.json() == md::host_receipt(lookup(other)).json(), "prefill selector remains case sensitive");
+    const auto json = receipt.json();
+    check(json.find("\"model_sha256\":\"\"") != std::string::npos && json.find("\"device\":\"\"") != std::string::npos,
+          "unknown identities serialize as empty");
+    check(receipt.witness() == "strix-engine-witness " + json + "\n", "canonical witness prefix and payload");
 }
 
 void test_baseline() {
@@ -377,6 +430,14 @@ void test_cli() {
           "CLI overrides env and baseline before validation");
     const auto d = md::parse_cli("serve", {"M"});
     check(d.transport == "usb4-auto" && d.slots == 8, "serve cli defaults = receipt");
+    const EnvMap none;
+    for (const char* session : {"named:prompt.u32:16", "./prompt.u32", "fast", "default"}) {
+        // Defaults inspection never interprets --profile, including strings
+        // understood as product profiles by other engines. The app owns it.
+        const auto timed = md::parse_cli("rank", {"M", "0", "usb4-auto", "OUT", "--profile", session});
+        check(md::effective_config(timed, lookup(none)) == md::effective_config(md::Cli{}, lookup(none)),
+              std::string("legacy timed-session --profile left to app: ") + session);
+    }
 }
 
 void test_serve_preflight() {
@@ -496,7 +557,9 @@ int main(int argc, char** argv) {
         test_table();
         test_receipts(argv[1]);
         test_off_switches();
+        test_resolution_sources();
         test_baseline();
+        test_host_receipt();
         test_cli();
         test_async_group();
         test_serve_preflight();

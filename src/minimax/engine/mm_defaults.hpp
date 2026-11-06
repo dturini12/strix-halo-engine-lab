@@ -15,16 +15,11 @@
 #include <span>
 #include <string>
 #include <vector>
+#include "strix/engine_profile.hpp"
 
 namespace strix::minimax::defaults {
 
-struct Item {
-    const char* name;     // short id (docs/optimizations.json)
-    const char* env;      // the switch
-    const char* on;       // default value (the measured production value)
-    const char* off;      // the value that restores the path before the item
-    const char* receipt;  // evidence of the measurement that adopted it
-};
+using Item = profile::DefaultItem;
 
 inline constexpr const char* kBaselineEnv = "STRIX_MM_BASELINE";
 
@@ -39,17 +34,23 @@ inline bool pf_async_group(bool enabled, std::span<const std::size_t> rows, std:
     return true;
 }
 
-enum class Source { on, baseline, env };
+using Source = profile::DefaultSource;
 struct Resolved {
     const Item* item = nullptr;
     std::string value;
     Source source = Source::on;
 };
 
-using Lookup = std::function<const char*(const char*)>;
+using Lookup = profile::Lookup;
 
 bool baseline(const Lookup& env);                 // STRIX_MM_BASELINE set and not 0
 std::vector<Resolved> resolve(const Lookup& env);  // pure: same order as items()
+
+// Partial host receipt, not evidence of execution or asset compatibility. Records
+// the engine's declared arithmetic and selected prefill route, without probing a
+// device or assets. Runtime callers must supply measured identities/digests before
+// emitting witness(); startup and effective_config() do not emit a witness.
+profile::ExecutionReceipt host_receipt(const Lookup& env);
 
 // Process environment, once per process: exports every unset item's resolved value (no overwrite) and prints one line
 // when the baseline switch is on.

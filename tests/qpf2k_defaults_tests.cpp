@@ -54,7 +54,7 @@ void policy_tests() {
             expect(!startup.contains(entry.name), "non-decoder clients retain exact prefill opt-ins");
     qpf2k::defaulted_items = all;
     for (const auto& entry : qpf2k::defaults) {
-        expect(automatic.at(entry.name) == entry.value, "non-GSQ default values are unchanged");
+        expect(automatic.at(entry.name) == entry.on, "non-GSQ default values are unchanged");
         expect(!qpf2k::suppressed(entry.item), "ordinary model keeps every default");
         const qpf2k::ModelScope gsq(true);
         expect(qpf2k::suppressed(entry.item), "GSQ excludes every injected item");
@@ -69,7 +69,7 @@ void policy_tests() {
         worker.join();
         expect(!other_thread, "model exclusion does not leak to another worker");
     }
-    for (const auto& entry : qpf2k::defaults) for (const auto* value : {"0", entry.value}) {
+    for (const auto& entry : qpf2k::defaults) for (const auto* value : {"0", entry.on}) {
         Environment explicit_env{{entry.name, value}};
         qpf2k::defaulted_items = initialize(explicit_env);
         const qpf2k::ModelScope gsq(true);
@@ -226,7 +226,7 @@ void sched_defer_tests() {
     // STRIX_QPF2K_SCHED default 14 = bit 2 (deferred block completion) + the historical bits 4 and 8.
     const auto entry = std::find_if(qpf2k::defaults.begin(), qpf2k::defaults.end(),
         [](const auto& d) { return d.item == qpf2k::Item::sched; });
-    expect(entry != qpf2k::defaults.end() && std::string_view(entry->value) == "14", "SCHED default is 14");
+    expect(entry != qpf2k::defaults.end() && std::string_view(entry->on) == "14", "SCHED default is 14");
     expect(qpf2k::effective_sched(14U, true) == 14U && qpf2k::effective_sched(14U, false) == 12U &&
         qpf2k::effective_sched(12U, false) == 12U && qpf2k::effective_sched(13U, false) == 13U &&
         qpf2k::effective_sched(15U, false) == 13U, "only bit 2 is masked where it cannot run");
@@ -272,7 +272,7 @@ void reexec_handoff_tests() {
         "restarted image restores every injected item and the MoE marker as defaulted");
     for (const auto& entry : qpf2k::defaults)
         if (injected & qpf2k::bit(entry.item))
-            expect(child.at(entry.name) == entry.value, "restarted image runs the default values");
+            expect(child.at(entry.name) == entry.on, "restarted image runs the default values");
     expect(child.at("STRIX_QPF2K_SCHED") == "14" && child.at("STRIX_QPF2K_DENSE") == "0" && child.at("STRIX_QPF2K_GDN") == "1",
         "effective values are unchanged by the restart");
     expect(!qpf2k::cli_sched_defers(true) && qpf2k::cli_sched_defers(false),

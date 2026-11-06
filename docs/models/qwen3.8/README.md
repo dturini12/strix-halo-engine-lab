@@ -124,15 +124,15 @@ The 262K prefill cell and the 262K serial decode cell are from the build with th
 prompt, prefill time without model load, `--profile default`, one run on Linux 7.4: 175.18 s; 176.60 s on `17b9c57b8`,
 within run-to-run noise); the 262K MTP decode cell is from build
 `7b2453fe`; the row's other cells are from the build above.
-The 1M row's serial cells are from public main `fdc39faba` on Linux 7.3; its MTP cells and exact gate are from the
-MTP admission change (#288) on Linux 7.4. The two sets were measured on different kernels, so each cell states its
-kernel and the row gives no serial-to-MTP ratio.
+The 1M row's serial cells are from public main `ff12e7344` (1,048,320-token prompt, setup 43.1 s + prefill 915.7 s,
+decode 50.28 ms/step); its MTP cells and exact gate are from the MTP admission change (#288). Both sets ran on
+Linux 7.4, so the row's MTP decode is 3.0x serial.
 
 | Context (YaRN factor) | Exact gate (MTP == serial == pool off) | TTFT serial / MTP | Prefill, serial | Decode serial / MTP | MTP acceptance |
 |---|---|---|---|---|---|
 | 262,400 (2) | Full scope | 219 s / 224 s | **1,496 tok/s** `--profile default` (GDN plain-launch fix) | 21.74 (GDN plain-launch fix) / **59.5 tok/s** (`7b2453fe`) | 79 % (98/124) |
 | 524,288 (2) | Target scope | 470 s / 508 s | 1,215 tok/s | 19.7 / **60.6 tok/s** (3.1x) | 85 % |
-| 1,048,576 (4) | Full scope (MTP against serial with the two prefill paths below off) | 925 s (Linux 7.3) / 1,133 s (Linux 7.4) | 1,198 tok/s (Linux 7.3); MTP route 936 tok/s (Linux 7.4) | 19.6 (Linux 7.3) / **60.2 tok/s** (Linux 7.4) | 85 % (102/120) |
+| 1,048,576 (4) | Full scope (MTP against serial with the two prefill paths below off) | 958.8 s / 1,133 s | 1,145 tok/s; MTP route 936 tok/s | 19.9 / **60.2 tok/s** | 85 % (102/120) |
 
 Since the HC FP16 output path became the default prefill arithmetic, serial YaRN prefill uses it, while the
 YaRN MTP route keeps the previous HC output and index projection arithmetic. Each route is exact against its
@@ -275,7 +275,7 @@ Digests match that identity's reference at 32K/64K/128K/262K; this is not dense-
 or a new long-context model-fidelity qualification. See the [catalog](../../optimizations.md#qwen-tiled).
 
 Exact MTP draft attention and the router defaults are enabled in the public Qwen line.
-Batched MTP drafting remains opt-in. The HTTP server sizes its request slots from memory (`--http-batch N` caps, `0` = one at a time), serves decoding requests at layer boundaries inside long prompt blocks (`STRIX_BATCH_SERVICE_MS=250`), runs short prompts first and nests them into a paused long prompt (`STRIX_BATCH_NEST_ROWS=2048`), and cancels at those boundaries; every request keeps the token IDs and committed state it has alone. With a 32K prompt arriving among three decoding streams (default command) the p90 decode gap went from 14.3 s to 0.54 s and a short request's first token from 42-52 s to 2.3-3.8 s ([serving](../../engine/serving/serving.md#batched-decoding)).
+Batched MTP drafting remains opt-in. The HTTP server sizes its request slots from memory (`--http-batch N` caps, `0` = one at a time), serves decoding requests at layer boundaries inside long prompt blocks (`STRIX_BATCH_SERVICE_MS=250`), runs short prompts first and nests them into a paused long prompt (`STRIX_BATCH_NEST_ROWS=2048`), and cancels at those boundaries; every request keeps the token IDs and committed state it has alone. A prompt group takes at most 4 blocks unless every slot is busy and a request waits (`STRIX_PROMPT_BATCH_AUTO=0` turns this off): an 8 x 1024 burst's first-token p50 drops 21 % and a 16 x 1024 burst's 15 %, makespan within noise, tokens identical ([prompt groups](../../engine/prefill/prompt-batch.md)). With a 32K prompt arriving among three decoding streams (default command) the p90 decode gap went from 14.3 s to 0.54 s and a short request's first token from 42-52 s to 2.3-3.8 s ([serving](../../engine/serving/serving.md#batched-decoding)).
 
 **MoE route BF16 storage — opt-in candidate, pending qualification.** `STRIX_QPF2K_MOE_ROUTE_BF16=1`
 (or `--prefill-moe-route-bf16 on`) stores the per-route MoE dot products in BF16 and widens them exactly in the

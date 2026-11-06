@@ -23,7 +23,7 @@
 // STRIX_DS41_RTX_BASELINE=1 applies baseline before all arguments. --print-config emits
 // resolved JSON and exits before CUDA, fixtures or model reads (dummy model paths allowed; --draft under caps
 // reads the model's GGUF header when it can).
-// --profile default|fast|quality (STRIX_DS41_PROFILE; strix/ds41_rtx_profile.hpp): one switch for every lever. default (= no
+// --profile default|fast|quality (STRIX_DS41_PROFILE; strix/profiles/ds41_rtx.hpp): one switch for every lever. default (= no
 // --profile) is today's configuration; quality = default (no higher-precision expert pack on the RTX); fast = default +
 // the qualified fast-only levers (none yet: they are listed as pending and not used). Per-lever options stay as expert
 // overrides (CLI > environment > profile > builtin); --allow-pending (STRIX_DS41_PROFILE_ALLOW_PENDING=1) runs a pending
@@ -95,7 +95,7 @@
 #include "strix/ds41_rtx_schedule.hpp"
 #include "strix/ds41_rtx_budget.hpp"
 #include "strix/ds41_rtx_drafter_select.hpp"
-#include "strix/ds41_rtx_profile.hpp"
+#include "strix/profiles/ds41_rtx.hpp"
 
 #include "cuda_ds41_replica_serve.hpp"
 #include "cuda_ds41_session_draft.hpp"
@@ -527,7 +527,7 @@ int main(int argc, char** argv) {
         bool known = true;  // two chains: one else-if chain this long nests too deeply for MSVC inside a lambda
         if (a == "--baseline") baseline();
         else if (a == "--print-config" || a == "--print-effective-config") print_config = true;
-        else if (a == "--profile") next();             // resolved before the options (strix/ds41_rtx_profile.hpp)
+        else if (a == "--profile") next();             // resolved before the options (strix/profiles/ds41_rtx.hpp)
         else if (a == "--allow-pending") {}            // idem
         else if (a == "--ce-pacing") ce_pacing = true;
         else if (a == "--no-ce-pacing") ce_pacing = false;

@@ -1,0 +1,85 @@
+{
+  "schema": "strix-gate/v1",
+  "engine": "synthetic",
+  "ticket": "host-fixture",
+  "sources": {
+    "A": "synthetic-before",
+    "B": "synthetic-after"
+  },
+  "ranks": [
+    0,
+    1
+  ],
+  "timeout_s": 5,
+  "commands": {
+    "A": [
+      {
+        "rank": 0,
+        "argv": [
+          "python",
+          "tools/strix-gate/synthetic_engine.py",
+          "--rank",
+          "0"
+        ]
+      },
+      {
+        "rank": 1,
+        "argv": [
+          "python",
+          "tools/strix-gate/synthetic_engine.py",
+          "--rank",
+          "1"
+        ]
+      }
+    ],
+    "B": [
+      {
+        "rank": 0,
+        "argv": [
+          "python",
+          "tools/strix-gate/synthetic_engine.py",
+          "--rank",
+          "0"
+        ]
+      },
+      {
+        "rank": 1,
+        "argv": [
+          "python",
+          "tools/strix-gate/synthetic_engine.py",
+          "--rank",
+          "1"
+        ]
+      }
+    ]
+  },
+  "compare": {
+    "stdout_keys": [
+      "tokens",
+      "decode_identity",
+      "qwen_receipt",
+      "deepseek_receipt",
+      "minimax_receipt"
+    ],
+    "stderr_witnesses": [
+      "^strix-build-info [^\\n]+$",
+      "^strix-startup-event [^\\n]+$",
+      "^decode_identity [^\\n]+$",
+      "^auto-prefill identity [^\\n]+$",
+      "^decode attention identity [^\\n]+$",
+      "^rank [01] prefill \\[mla\\] identity [^\\n]+$"
+    ],
+    "digest_fields": [
+      {
+        "stream": "stdout",
+        "key": "state_fnv",
+        "format": "fnv64"
+      },
+      {
+        "stream": "stdout",
+        "key": "logits_sha256",
+        "format": "sha256"
+      }
+    ]
+  }
+}

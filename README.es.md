@@ -66,7 +66,7 @@ filas con sus condiciones, número de repeticiones, evidencia de exactitud e int
 | Qwen3.8-Flash-Next | 1 nodo | TTFT de prefill exacto, 4K / 32K, ruta predeterminada de la CLI simple | **2.397 / 19.05 s** | 2.548 / 20.57 s con todas las palancas predeterminadas desactivadas → −5.9 / −7.4 % (un binario, ejecuciones alternas; 32K T16384 frente a T8192) | main, un binario |
 | Qwen3.8-Flash-Next | 1 nodo | Prefill exacto, comando simple, 1K / 4K / 32K / 128K / 262,143 tokens | **1,337 / 1,695 / 1,713 / 1,617 / 1,509 tok/s** (32K 19.13 s; 54–56 % de los techos del contrato) | 1,363 / 1,395 / 1,238 / 1,089 tok/s con 4K / 32K / 128K / 262,143 en `8b99cf58` | main `85353311b`, un binario |
 | Qwen3.8-Flash-Next | 1 nodo | Prefill de 262,144 tokens (YaRN factor 2), ruta serial | **1,496 tok/s** `default` (una ejecución, Linux 7.4) | 1,484 tok/s en `17b9c57b8` (dentro del ruido entre ejecuciones) | corrección del lanzamiento simple de GDN |
-| Qwen3.8-Flash-Next | 1 nodo | Decode MTP con contexto de 262K / 524K / 1M (YaRN) | **59.5 / 60.6 / 60.2 tok/s** | decode YaRN serial 21.74 / 19.7 / 19.6 tok/s; con 1M el serial se midió con Linux 7.3 y el MTP con Linux 7.4, así que no se da un cociente | `7b2453fe` (MTP 262K), corrección del lanzamiento simple de GDN (serial 262K), `a199c8e0` (524K), #288 `3b8b9ac0f` (1M) |
+| Qwen3.8-Flash-Next | 1 nodo | Decode MTP con contexto de 262K / 524K / 1M (YaRN) | **59.5 / 60.6 / 60.2 tok/s** | decode YaRN serial 21.74 / 19.7 / 19.9 tok/s; con 1M ambos con Linux 7.4, MTP 3.0x el serial (serial 1M: TTFT 958.8 s, prefill 1,145 tok/s) | `7b2453fe` (MTP 262K), corrección del lanzamiento simple de GDN (serial 262K), `a199c8e0` (524K), #288 `3b8b9ac0f` (MTP 1M), main `ff12e7344` (serial 1M) |
 | Qwen3.8-Flash-Next | 2 nodos, una réplica en cada uno | Chats de programación por HTTP, C1 / C8, rendimiento de reloj (wall) | **68.2 / 158.1 tok/s** | +3.6 % wall en C8 y −6.9 % de TTFT en C4 respecto a la compilación release, misma sesión | `0117a140` |
 | Qwen3.8-Flash-Next | 1 nodo | Runner HTTP único, conversación de 127.6K tokens, decode en frío | **52.0 tok/s** | 39.5 tok/s antes del pool MTP de QSA; turnos restaurados +31 % / +37 % | main |
 | Qwen3.8-Flash-Next + RTX PRO | 1 nodo + RTX PRO | Prefill delegado (offload), TTFT con 32K (8K) | **8.99 s** (2.94 s) | 44.02 s (10.46 s) en el mismo servidor sin la RTX, 4.9× con 32K | `70b93af3` |
@@ -78,7 +78,7 @@ filas con sus condiciones, número de repeticiones, evidencia de exactitud e int
 | DeepSeek V4.1 Flash, independiente | RTX PRO 6000 (Windows) | Decode DSpark en la GPU, código / inglés / español, misma carga | **82.3 / 87.7 / 94.4 tok/s** (mejores entre cargas 94–95 / 97 / 100–101) | poda del draft keep-64 +16 % en código; conjunto de kernels de decode/caché con todo en caché 12.62 → 10.50 ms/token | línea medida del PR #52 |
 | **MiniMax M3.1 Flash** | 2 nodos | Decode greedy, 1K / 8K, 256 tokens | **43.30 / 45.06 ms/token** (23.10 / 22.19 tok/s), en frío | 44.57 / 46.10 ms/token en `8cc30ac0`; valores predeterminados de frontera de intercambio: N1 48.22 → 43.92 ms/paso; palancas posteriores de malla MoE + o_proj en caliente −1.2 % y −1.3 % con 8K | árbol público del PR #59 |
 | MiniMax M3.1 Flash | 2 nodos | Decode DSpark, JSON / Python / prosa | **59.96 / 36.93 / 27.05 tok/s** | 54.4 / 34.1 / 24.1 tok/s en `8cc30ac0`; admisión automática en el servicio: JSON −34.6 %, código −17.5 % de tiempo de reloj, la prosa sigue simple | PR #70 `fbd43423` |
-| MiniMax M3.1 Flash | 2 nodos | TTFT del prefill combinado, 8K / 32K | **14.04 s** (583 tok/s) / **63.48 s** (516 tok/s) | 17.731 / 91.508 s en `e0bad3d1` → −21 / −31 % (gather + q/k/v, conjunto de prefill publicado, stream de cola, par de tuberías del prefill) | #334 `c225cdaa2`; 8K brazos alternos en un proceso (13.85–14.29 s), 32K proceso nuevo |
+| MiniMax M3.1 Flash | 2 nodos | TTFT del prefill combinado, 1K / 8K / 32K, valores predeterminados | **2.67 s** (1,024 tokens, 383 tok/s) / **13.75 s** (8,192 tokens, 596 tok/s) / **61.92 s** (32,768 tokens, 529 tok/s) | 17.731 / 91.508 s en `e0bad3d1` → −22 / −32 % con 8K / 32K (gather + q/k/v, conjunto de prefill publicado, stream de cola, par de tuberías del prefill) | main `e778ef3c6`; un proceso nuevo por celda, resultados coincidentes en ambos rangos |
 | **GLM-5.3 Flash** | 2 nodos | Decode con autoespeculación MTP, chat / código / JSON | **37.1 / 44.5 / 40.0 tok/s** | 1.50× / 1.79× / 1.62× el decode R1b simple (40.3–40.6 ms/token); identidad R1b −11.5 % frente a R1 | identidad predeterminada |
 | GLM-5.3 Flash | 2 nodos | TTFT de prefill exacto por chunks, 1K / 8K / 32K, chunks de 8192 filas | **2.83 / 15.15 / 61.96 s** (541 / 529 tok/s con 8K / 32K), todo predeterminado | 3.18 / 17.77 / 76.59 s → 2.83 / 15.15 / 61.96 s (−11.0 / −14.7 / −19.1 %), logits bit a bit; último paso, tiles del resto MoE: 8K −1.3 % (pares alternos), 32K −1.2 % (ambos órdenes de ejecución) | #300 `32ec66bd3` |
 | GLM-5.3 Flash | 2 nodos | Servido (`strix-glm5-serve`), flujos concurrentes C1 / C2 / C4 / C6 / C8, decode en régimen estable; 8 prompts de chat cortos integrados con la plantilla de chat de GLM, 22–59 tokens de prompt (media ~33), hasta 128 tokens greedy cada uno, arranque con barrera, caché de prefijos desactivada | **C1 40.0 / C2 53.0 (G2 desactivado 37.8) / C4 59.9 (53.6) / C6 62.5 (62.4) / C8 69.5 (69.4) tok/s agregados** | cada flujo == la misma petición sola (exacto); C1 con MTP (25.30 tok/s sin MTP); verificación MTP por lotes (G2) +40 / +12 % con C2 / C4, cede el paso a los pasos simples por lotes desde C6 | actual |
@@ -223,6 +223,18 @@ los dos nodos dan los mismos bits para esa identidad. Se compila con `-DSTRIX_FA
 compila nada); cada palanca de velocidad tiene su propio flag y sin ellas la ejecución es la referencia densa.
 [Instalación, ficheros del modelo, un comando por clip y vuelta atrás](docs/models/minimax-h3/README.es.md#h3-install) ·
 [desglose por etapas](docs/models/minimax-h3/README.es.md#h3-result).
+
+## Añadir un modelo
+
+Registrar metadatos descriptivos de un contrato compilado ya soportado requiere un archivo de descripción
+(`models/<nombre>.toml`) y una fila del registro (una tabla `[models.<id>]` en `models/registry.toml`). Estos archivos
+no añaden soporte de inferencia para otro tamaño o contrato de checkpoint. Cambiar el contrato sigue requiriendo
+adaptar el motor de la familia y superar su cualificación, y una arquitectura nueva necesita su propio módulo de familia
+(kernels, recorrido de capas, adaptador) que se conecta al código común de perfil, recibo y tabla de interruptores. El
+registro no se lee en tiempo de ejecución; `strix-model-registry-tests` solo comprueba nombres, existencia de archivos
+y cobertura. Alcance por familia, comandos y las comprobaciones en el dispositivo antes de dar un modelo por soportado:
+[docs/engine/adding-a-model.es.md](docs/engine/adding-a-model.es.md). La tabla de interruptores generada a partir de las
+tablas de valores por defecto de los motores: [docs/engine/optimization-table.md](docs/engine/optimization-table.md).
 
 ## Documentación
 

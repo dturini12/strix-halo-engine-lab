@@ -4,6 +4,7 @@
 // MiniMax M3.1 defaults-on resolver: the table of default-ON items, the baseline master switch and the canonical
 // effective configuration (see mm_defaults.hpp).
 #include "minimax/engine/mm_defaults.hpp"
+#include "minimax/engine/route_identity.hpp"
 #include "minimax/serve/minimax_sched.hpp"
 #include "minimax/dspark/minimax_auto.hpp"
 
@@ -20,7 +21,9 @@
 #include <filesystem>
 #include <fstream>
 #ifdef _WIN32
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 #endif
 #include <set>
@@ -173,18 +176,28 @@ std::vector<Resolved> resolve(const Lookup& env) {
     std::vector<Resolved> out;
     out.reserve(std::size(kItems));
     for (const Item& it : kItems) {
-        Resolved r;
-        r.item = &it;
-        if (const char* v = env(it.env); v != nullptr) {
-            r.value = v;
-            r.source = Source::env;
-        } else {
-            r.value = base ? it.off : it.on;
-            r.source = base ? Source::baseline : Source::on;
-        }
-        out.push_back(std::move(r));
+        // Empty item values are explicit in the legacy resolver too. Baseline's
+        // separate nonempty/not-"0" truthiness above remains MiniMax policy.
+        auto value = profile::resolve_default(it, base, env);
+        out.push_back({&it, std::move(value.value), value.source});
     }
     return out;
+}
+
+profile::ExecutionReceipt host_receipt(const Lookup& env) {
+    profile::ExecutionReceipt receipt;
+    receipt.engine = "minimax-m3.1";
+    receipt.implementation = "minimax-pair";
+    receipt.build = STRIX_MM_GU4_SCALAR ? "gu4_scalar=on" : "gu4_scalar=off";
+    // Declared in include/strix/minimax/engine.hpp: FP32 partials, then a
+    // fixed rank-order sum. This is distinct from any other engine's contract
+    // and does not identify the assets or a complete reduction/kernel plan.
+    receipt.identity.arithmetic_contract = "MiniMax M3.1 FP32 partials with fixed rank-order sum";
+    const char* prefill = env("STRIX_MM_PREFILL_IDENTITY");
+    receipt.identity.prefill_lineage = route::fp32_profile(prefill) ? "fp32" : "production";
+    // Kernel, device, topology, asset hashes, state format and the complete
+    // reduction plan are unknown at this host-only policy boundary.
+    return receipt;
 }
 
 void apply() {

@@ -127,15 +127,15 @@ La celda de prefill a 262K y la de decode serial a 262K proceden del build con l
 (prompt de 262,144 tokens, tiempo de prefill sin la carga del modelo, `--profile default`, una ejecución con Linux 7.4: 175.18 s;
 176.60 s en `17b9c57b8`, dentro del ruido entre ejecuciones); la celda de decode MTP a
 262K procede del build `7b2453fe`; las demás celdas de la fila proceden del build indicado arriba.
-Las celdas serial de la fila de 1M proceden de la rama main pública `fdc39faba` con Linux 7.3; sus celdas MTP y su gate
-exacto proceden del cambio de admisión MTP (#288) con Linux 7.4. Ambos conjuntos se midieron con kernels distintos, por lo
-que cada celda indica su kernel y la fila no da una relación entre serial y MTP.
+Las celdas serial de la fila de 1M proceden de la rama main pública `ff12e7344` (prompt de 1,048,320 tokens, preparación
+43.1 s + prefill 915.7 s, decode 50.28 ms/paso); sus celdas MTP y su gate exacto proceden del cambio de admisión MTP (#288).
+Ambos conjuntos se midieron con Linux 7.4, de modo que el decode MTP de la fila es 3.0x el serial.
 
 | Contexto (factor YaRN) | Gate exacto (MTP == serial == pool desactivado) | TTFT serial / MTP | Prefill, serial | Decode serial / MTP | Aceptación MTP |
 |---|---|---|---|---|---|
 | 262,400 (2) | Alcance completo | 219 s / 224 s | **1,496 tok/s** `--profile default` (corrección del lanzamiento simple de GDN) | 21.74 (corrección del lanzamiento simple de GDN) / **59.5 tok/s** (`7b2453fe`) | 79 % (98/124) |
 | 524,288 (2) | Alcance objetivo | 470 s / 508 s | 1,215 tok/s | 19.7 / **60.6 tok/s** (3.1x) | 85 % |
-| 1,048,576 (4) | Alcance completo (MTP frente a serial con las dos rutas de prefill indicadas abajo desactivadas) | 925 s (Linux 7.3) / 1,133 s (Linux 7.4) | 1,198 tok/s (Linux 7.3); ruta MTP 936 tok/s (Linux 7.4) | 19.6 (Linux 7.3) / **60.2 tok/s** (Linux 7.4) | 85 % (102/120) |
+| 1,048,576 (4) | Alcance completo (MTP frente a serial con las dos rutas de prefill indicadas abajo desactivadas) | 958.8 s / 1,133 s | 1,145 tok/s; ruta MTP 936 tok/s | 19.9 / **60.2 tok/s** | 85 % (102/120) |
 
 Desde que la ruta de salida HC en FP16 pasó a ser la aritmética de prefill por defecto, el prefill serial de
 YaRN la usa, mientras que la ruta MTP de YaRN mantiene la aritmética anterior de salida HC y de proyección de
@@ -278,7 +278,7 @@ Los digests coinciden con la referencia de esa identidad a 32K/64K/128K/262K; es
 ni una nueva cualificación de fidelidad del modelo en contexto largo. Véase el [catálogo](../../optimizations.md#qwen-tiled).
 
 La atención de draft MTP exacta y los valores predeterminados del router están activados en la línea pública de Qwen.
-El drafting MTP por batch sigue siendo opt-in. El servidor HTTP dimensiona sus slots de petición a partir de la memoria (`--http-batch N` pone el límite, `0` = de uno en uno), atiende las peticiones en decode en los límites de capa dentro de bloques de prompt largos (`STRIX_BATCH_SERVICE_MS=250`), ejecuta primero los prompts cortos y los anida en un prompt largo en pausa (`STRIX_BATCH_NEST_ROWS=2048`), y cancela en esos límites; cada petición conserva los IDs de token y el estado confirmado que tendría sola. Con un prompt de 32K llegando entre tres flujos en decode (comando predeterminado), el hueco de decode p90 pasó de 14.3 s a 0.54 s y el primer token de una petición corta de 42-52 s a 2.3-3.8 s ([servicio](../../engine/serving/serving.md#batched-decoding)).
+El drafting MTP por batch sigue siendo opt-in. El servidor HTTP dimensiona sus slots de petición a partir de la memoria (`--http-batch N` pone el límite, `0` = de uno en uno), atiende las peticiones en decode en los límites de capa dentro de bloques de prompt largos (`STRIX_BATCH_SERVICE_MS=250`), ejecuta primero los prompts cortos y los anida en un prompt largo en pausa (`STRIX_BATCH_NEST_ROWS=2048`), y cancela en esos límites; cada petición conserva los IDs de token y el estado confirmado que tendría sola. Un grupo de prompts toma como máximo 4 bloques salvo que todos los slots estén ocupados y una petición espere (`STRIX_PROMPT_BATCH_AUTO=0` lo desactiva): el p50 del primer token de una ráfaga de 8 x 1024 baja un 21 % y el de una de 16 x 1024 un 15 %, con el makespan dentro del ruido y tokens idénticos ([grupos de prompts](../../engine/prefill/prompt-batch.md)). Con un prompt de 32K llegando entre tres flujos en decode (comando predeterminado), el hueco de decode p90 pasó de 14.3 s a 0.54 s y el primer token de una petición corta de 42-52 s a 2.3-3.8 s ([servicio](../../engine/serving/serving.md#batched-decoding)).
 
 **Almacenamiento BF16 de las rutas MoE: candidato opcional (opt-in), pendiente de cualificación.** `STRIX_QPF2K_MOE_ROUTE_BF16=1`
 (o `--prefill-moe-route-bf16 on`) guarda en BF16 los productos escalares MoE de cada ruta y los amplía de forma exacta en

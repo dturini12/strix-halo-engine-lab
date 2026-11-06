@@ -97,7 +97,8 @@ void load(std::ifstream& in, std::uint64_t offset, std::uint64_t bytes, std::uin
 double median(std::vector<double> v) {
     if (v.empty()) return 0.0;
     std::sort(v.begin(), v.end());
-    return v[v.size() / 2];
+    const auto h = v.size() / 2;
+    return v.size() % 2 ? v[h] : (v[h - 1] + v[h]) / 2.0;
 }
 double mean(const std::vector<double>& v) { return v.empty() ? 0.0 : std::accumulate(v.begin(), v.end(), 0.0) / static_cast<double>(v.size()); }
 

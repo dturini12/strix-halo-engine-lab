@@ -1,6 +1,7 @@
 // MiniMax engine: safetensors pack index and O_DIRECT reads (see mm_common.hpp).
 #include "mm_common.hpp"
 #include "strix/minimax/model_assets.hpp"
+#include "strix/minimax/model_description.hpp"
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -17,65 +18,6 @@ namespace {
 
 constexpr std::uint64_t kAlign = 4096;
 constexpr std::uint64_t kBounce = std::uint64_t{64} << 20;
-
-struct JsonParser {
-    const char* p;
-    const char* end;
-    void ws() { while (p < end && (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t')) ++p; }
-    Json parse() {
-        ws();
-        if (p >= end) throw std::runtime_error("json: eof");
-        if (*p == '{') {
-            ++p;
-            JsonObj o;
-            ws();
-            if (*p == '}') { ++p; return {o}; }
-            for (;;) {
-                ws();
-                std::string k = string();
-                ws();
-                if (*p++ != ':') throw std::runtime_error("json: ':'");
-                o.emplace(std::move(k), parse());
-                ws();
-                if (*p == ',') { ++p; continue; }
-                if (*p++ != '}') throw std::runtime_error("json: '}'");
-                return {o};
-            }
-        }
-        if (*p == '[') {
-            ++p;
-            JsonArr a;
-            ws();
-            if (*p == ']') { ++p; return {a}; }
-            for (;;) {
-                a.push_back(parse());
-                ws();
-                if (*p == ',') { ++p; continue; }
-                if (*p++ != ']') throw std::runtime_error("json: ']'");
-                return {a};
-            }
-        }
-        if (*p == '"') return {string()};
-        if (std::strncmp(p, "null", 4) == 0) { p += 4; return {nullptr}; }
-        if (std::strncmp(p, "true", 4) == 0) { p += 4; return {1.0}; }
-        if (std::strncmp(p, "false", 5) == 0) { p += 5; return {0.0}; }
-        char* e = nullptr;
-        const double d = std::strtod(p, &e);
-        if (e == p) throw std::runtime_error("json: value");
-        p = e;
-        return {d};
-    }
-    std::string string() {
-        if (*p++ != '"') throw std::runtime_error("json: string");
-        std::string s;
-        while (*p != '"') {
-            if (*p == '\\') { ++p; s += *p == 'n' ? '\n' : *p; ++p; continue; }
-            s += *p++;
-        }
-        ++p;
-        return s;
-    }
-};
 
 void pread_all(int fd, void* dst, std::uint64_t n, std::uint64_t off, const std::string& what) {
     auto* d = static_cast<std::uint8_t*>(dst);
@@ -98,14 +40,10 @@ float bf16f(std::uint16_t b) {
 
 }  // namespace
 
-Json parse_json(const char* begin, const char* end) {
-    JsonParser jp{begin, end};
-    return jp.parse();
-}
-
 PackReader::PackReader(std::string dir) : dir_(std::move(dir)) {
     const auto files = assets::pack_files(dir_, &snapshot_);
     const bool want_direct = std::getenv("STRIX_MM_LOAD_DIRECT") == nullptr || std::atoi(std::getenv("STRIX_MM_LOAD_DIRECT")) != 0;
+    description::PackHeaders headers(description::check_enabled());
     for (std::uint32_t f = 0; f < files.size(); ++f) {
         const std::string path = files[f].string();
         int fd = want_direct ? ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_DIRECT) : -1;
@@ -118,23 +56,28 @@ PackReader::PackReader(std::string dir) : dir_(std::move(dir)) {
         const int hfd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
         if (hfd < 0) throw std::runtime_error("open " + path);
         snapshot_.push_back(loaded_file(path, hfd));
+        struct stat st{};
+        if (::fstat(hfd, &st) != 0 || st.st_size < 8) {
+            ::close(hfd);
+            throw std::runtime_error("invalid safetensors header length: " + path);
+        }
         std::uint64_t hb = 0;
         pread_all(hfd, &hb, 8, 0, path);
+        std::uint64_t payload_bytes = 0;
+        try { payload_bytes = description::header_payload_bytes(hb, static_cast<std::uint64_t>(st.st_size)); }
+        catch (...) { ::close(hfd); throw; }
         std::string head(hb, '\0');
         pread_all(hfd, head.data(), hb, 8, path);
         ::close(hfd);
-        const Json h = parse_json(head.data(), head.data() + head.size());
-        for (const auto& [name, v] : h.obj()) {
-            if (name == "__metadata__") continue;
+        for (const auto& entry : headers.add(head, payload_bytes)) {
             TensorInfo t;
-            t.dtype = v.obj().at("dtype").str();
-            for (const auto& s : v.obj().at("shape").arr()) t.shape.push_back(static_cast<std::uint64_t>(s.num()));
-            const auto& off = v.obj().at("data_offsets").arr();
-            const auto b = static_cast<std::uint64_t>(off[0].num()), e = static_cast<std::uint64_t>(off[1].num());
+            t.dtype = entry.dtype;
+            t.shape = entry.shape;
             t.file = f;
-            t.offset = 8 + hb + b;
-            t.bytes = e - b;
-            tensors_.emplace(name, std::move(t));
+            t.offset = 8 + hb + entry.begin;
+            t.bytes = entry.end - entry.begin;
+            if (!tensors_.emplace(entry.name, std::move(t)).second)
+                throw std::runtime_error("duplicate tensor across safetensors shards: " + entry.name);
         }
     }
     void* p = nullptr;

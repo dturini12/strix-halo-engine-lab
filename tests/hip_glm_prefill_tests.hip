@@ -785,6 +785,165 @@ void test_dense_rows_v2(std::mt19937& g, bool bench) {
     hok(hipStreamDestroy(stream), "dense stream destroy");
 }
 
+// Dense v3 gate: every v3 tile (auto + rt 32/64/128 x c 32/64) and the grouped form against v2 one projection at a time,
+// bitwise with guards. Bench (STRIX_GLM_PF_DENSE_BENCH=1, after PASS): the production groups at R 4096 / 8192, v2 singles vs
+// v3 auto vs each tile, 7 paired medians.
+void test_dense_rows_v3(std::mt19937& g, bool bench) {
+    struct Proj { unsigned n, o0; };
+    struct Group { const char* name; unsigned in; D::WType wt; std::vector<Proj> p; };
+    const Group groups[] = {{"kda f_a+g_a+b", 4096, D::WType::F16, {{128, 0}, {128, 0}, {32, 0}}},
+                            {"dsa wk+gate+wproj", 4096, D::WType::F16, {{128, 0}, {128, 0}, {32, 0}}},
+                            {"router", 4096, D::WType::F16, {{288, 0}}},
+                            {"bf16 mixed o0", 4096, D::WType::BF16, {{32, 3}, {129, 1}, {64, 0}}},
+                            {"f_b", 128, D::WType::F16, {{4096, 0}}},
+                            {"f32 256", 256, D::WType::F32, {{129, 1}, {24, 0}}}};
+    const unsigned tiles[][2] = {{0, 0}, {128, 64}, {64, 64}, {32, 64}, {128, 32}, {64, 32}, {32, 32}};
+    unsigned passed = 0, total = 0;
+    hipStream_t stream;
+    hok(hipStreamCreate(&stream), "dense3 stream");
+    for (unsigned phase = 0; phase < (bench ? 2U : 1U); ++phase) {
+        if (phase == 1 && failures != 0) {
+            std::printf("dense_rows v3 timing skipped: gate failed\n");
+            break;
+        }
+        for (const auto& G : groups) {
+            const unsigned np = static_cast<unsigned>(G.p.size());
+            std::vector<void*> dw(np);
+            for (unsigned i = 0; i < np; ++i) {
+                const std::size_t wn = static_cast<std::size_t>(G.p[i].n + G.p[i].o0) * G.in;
+                if (G.wt == D::WType::F32) {
+                    auto w = rnd(wn, g, 0.05F);
+                    const float special[] = {-0.0F, 0.0F, 0x1p-149F, -0x1p-126F, 0x1p20F, -0x1p20F};
+                    for (std::size_t j = 0; j < wn; j += 257) w[j] = special[(j / 257) % 6];
+                    dw[i] = up(w);
+                } else {
+                    auto w = rnd_half(wn, g, 0.05F, G.wt == D::WType::BF16);
+                    const std::uint16_t special[] = {0x8000, 0, 1, 0x8001,
+                        static_cast<std::uint16_t>(G.wt == D::WType::F16 ? 0x03FF : 0x007F),
+                        static_cast<std::uint16_t>(G.wt == D::WType::F16 ? 0x7BFF : 0x4980)};
+                    for (std::size_t j = 0; j < wn; j += 257) w[j] = special[(j / 257) % 6];
+                    dw[i] = up(w);
+                }
+            }
+            const std::size_t keep = g_allocs.size();
+            for (unsigned R : {1U, 7U, 31U, 33U, 65U, 513U, 4096U, 8192U}) {
+                if (phase == 1 && R != 4096 && R != 8192) continue;
+                std::vector<float> x(static_cast<std::size_t>(R) * G.in);
+                for (auto& f : x) {
+                    const auto u = static_cast<std::uint32_t>((g() & 0x807FFFFFU) | ((1U + g() % 187U) << 23));
+                    std::memcpy(&f, &u, 4);
+                }
+                const float special[] = {-0.0F, 0.0F, 0x1p-149F, -0x1p-149F, 0x1p-126F, -0x1p60F};
+                for (std::size_t i = 0; i < x.size(); i += 131) x[i] = special[(i / 131) % 6];
+                const float* dx = up(x);
+                std::vector<float*> ya(np), yb(np);
+                for (unsigned i = 0; i < np; ++i) {
+                    ya[i] = poison<float>(static_cast<std::size_t>(R) * G.p[i].n + 64);
+                    yb[i] = poison<float>(static_cast<std::size_t>(R) * G.p[i].n + 64);
+                }
+                std::vector<P::DenseProj> pa(np), pb(np);
+                for (unsigned i = 0; i < np; ++i) {
+                    pa[i] = {dw[i], G.p[i].o0, G.p[i].n, ya[i]};
+                    pb[i] = {dw[i], G.p[i].o0, G.p[i].n, yb[i]};
+                }
+                auto v2 = [&] { P::dense_rows_group_versioned(dx, G.wt, G.in, pa.data(), np, R, stream, 2); };
+                auto v3 = [&](unsigned t) {
+                    P::dense_rows_group_versioned(dx, G.wt, G.in, pb.data(), np, R, stream, 3, tiles[t][0], tiles[t][1]);
+                };
+                v2();
+                std::vector<std::vector<float>> ref(np);
+                for (unsigned i = 0; i < np; ++i) ref[i] = down(ya[i], static_cast<std::size_t>(R) * G.p[i].n);
+                bool all = true;
+                for (unsigned t = 0; t < 7; ++t) {
+                    v3(t);
+                    bool equal = true;
+                    for (unsigned i = 0; i < np; ++i) {
+                        const std::size_t cnt = static_cast<std::size_t>(R) * G.p[i].n;
+                        const auto b = down(yb[i], cnt + 64);
+                        equal &= bits_eq(ref[i], std::vector<float>(b.begin(), b.begin() + static_cast<std::ptrdiff_t>(cnt)));
+                        for (std::size_t j = 0; j < cnt; ++j) equal &= is_finite(b[j]);
+                        for (std::size_t j = cnt; j < cnt + 64; ++j) {
+                            std::uint32_t u;
+                            std::memcpy(&u, &b[j], 4);
+                            equal &= u == 0xFFFFFFFFU;
+                        }
+                    }
+                    all &= equal;
+                    if (phase == 0) {
+                        ++total;
+                        passed += equal;
+                        check(equal, "dense_rows v3 == v2 " + std::string(G.name) + " R=" + std::to_string(R) + " tile " +
+                                         std::to_string(tiles[t][0]) + "x" + std::to_string(tiles[t][1]) + " + guards");
+                    }
+                }
+                if (phase == 1) {
+                    if (!all) {
+                        check(false, "dense_rows v3 benchmark input bitwise gate");
+                    } else {
+                        hipEvent_t start, stop;
+                        hok(hipEventCreate(&start), "dense3 event");
+                        hok(hipEventCreate(&stop), "dense3 event");
+                        std::vector<float> times[8];  // 0 = v2 singles, 1 + t = v3 tile t
+                        for (unsigned round = 0; round < 7; ++round) {
+                            for (unsigned arm = 0; arm < 8; ++arm) {
+                                const unsigned a = (round + arm) % 8;
+                                hok(hipEventRecord(start, stream), "dense3 start");
+                                if (a == 0) v2();
+                                else v3(a - 1);
+                                hok(hipEventRecord(stop, stream), "dense3 stop");
+                                times[a].push_back(ms_between(start, stop));
+                            }
+                        }
+                        for (auto& t : times) std::sort(t.begin(), t.end());
+                        std::printf("dense_rows v3 bench %s in=%u R=%u: v2 %.3f ms | v3 auto %.3f", G.name, G.in, R, times[0][3],
+                                    times[1][3]);
+                        for (unsigned t = 1; t < 7; ++t) std::printf(" | %ux%u %.3f", tiles[t][0], tiles[t][1], times[1 + t][3]);
+                        std::printf(" ms (auto %.3fx, 7 paired medians)\n", times[0][3] / times[1][3]);
+                        hok(hipEventDestroy(start), "dense3 event destroy");
+                        hok(hipEventDestroy(stop), "dense3 event destroy");
+                    }
+                }
+                while (g_allocs.size() > keep) {
+                    hok(hipFree(g_allocs.back()), "dense3 free");
+                    g_allocs.pop_back();
+                }
+            }
+            free_all();
+        }
+        if (phase == 0) std::printf("dense_rows v3: %u/%u bitwise\n", passed, total);
+    }
+    // Zero rows / all-empty projections must not touch device pointers.
+    const P::DenseProj z[2] = {{nullptr, 0, 0, nullptr}, {nullptr, 0, 0, nullptr}};
+    P::dense_rows_group_versioned(nullptr, D::WType::F16, 4096, z, 2, 7, stream, 3);
+    P::dense_rows_group_versioned(nullptr, D::WType::F16, 4096, z, 2, 0, stream, 3);
+    P::dense_rows_versioned(nullptr, nullptr, D::WType::F16, 4096, 0, 32, nullptr, 0, stream, 3);
+    // in % 32 != 0 (in = 100, R = 1): every version rejects it before any launch, so the v3 k loop never runs past the
+    // last row and the output stays untouched.
+    {
+        const unsigned in = 100;
+        const float* dx = up(rnd(in, g, 1.0F));
+        const void* dw = up(rnd_half(static_cast<std::size_t>(32) * in, g, 0.05F, false));
+        float* y = poison<float>(32 + 64);
+        const P::DenseProj p[2] = {{dw, 0, 32, y}, {dw, 0, 32, y}};
+        unsigned rejected = 0;
+        for (unsigned v : {1U, 2U, 3U}) {
+            try { P::dense_rows_group_versioned(dx, D::WType::F16, in, p, 2, 1, stream, v); } catch (const std::runtime_error&) { ++rejected; }
+            try { P::dense_rows_versioned(dx, dw, D::WType::F16, in, 0, 32, y, 1, stream, v); } catch (const std::runtime_error&) { ++rejected; }
+        }
+        hok(hipStreamSynchronize(stream), "dense3 in100 sync");
+        const auto b = down(y, 32 + 64);
+        bool untouched = true;
+        for (float f : b) {
+            std::uint32_t u;
+            std::memcpy(&u, &f, 4);
+            untouched &= u == 0xFFFFFFFFU;
+        }
+        check(rejected == 6 && untouched, "dense_rows in=100 R=1 rejected by v1/v2/v3 (single + group), output untouched");
+        free_all();
+    }
+    hok(hipStreamDestroy(stream), "dense3 stream destroy");
+}
+
 // mHC pre for many rows: pf::hc_pre_rows == dev::hc_pre bit for bit (F, mix, collapsed x), real L3 hc fn/base/scale;
 // row 0 = the real case stream, other rows random.
 void test_hc_rows(const std::string& cases, std::mt19937& g) {
@@ -1381,6 +1540,11 @@ float hc_special(std::mt19937& g) {
     std::memcpy(&f, &pool[k], sizeof(f));
     return f;
 }
+// The engine exchange's sum2 (R17, rank order): the reference for STRIX_GLM_PF_SUMEXP's sum-on-load.
+__global__ void t_sum2_kernel(const float* p0, const float* p1, float* y, std::size_t n) {
+    const std::size_t i = blockIdx.x * std::size_t{256} + threadIdx.x;
+    if (i < n) y[i] = p0[i] + p1[i];
+}
 void test_hc_expand_norm(std::mt19937& g) {
     constexpr unsigned n = kHc * kHidden;
     constexpr std::size_t guard = 17;
@@ -1437,6 +1601,32 @@ void test_hc_expand_norm(std::mt19937& g) {
             P::hc_pre_rows_v2(Xa, fn, base, scale, fa, za, ma, xa, R, nullptr);
             P::hc_expand_norm_rows(dX, mix, dY, Xb, fb, flb, R, nullptr);  // fb[0..R) receives rr
             P::hc_pre_rows_normed(Xb, fn, base, scale, fb, zb, mb, xb, R, nullptr);
+            // STRIX_GLM_PF_SUMEXP: dY split as p0 + p1. p1 is a second partial (specials too in stress >= 3); the
+            // reference is sum2 into a buffer, then hc_expand_norm_rows; the pair kernel must match it bitwise.
+            auto Q1 = rnd(nx, g, 1.0F);
+            if (stress >= 3)
+                for (auto& v : Q1) v = hc_special(g);
+            float* dQ1 = up(Q1);
+            float* dS = poison<float>(nx + guard);
+            t_sum2_kernel<<<static_cast<unsigned>((nx + 255) / 256), 256>>>(dY, dQ1, dS, nx);
+            hok(hipGetLastError(), "test sum2");
+            float *Xr = poison<float>(nf + guard), *Xs = poison<float>(nf + guard);
+            float *fr = poison<float>(R + guard), *fs = poison<float>(R + guard);
+            unsigned *flr = zalloc<unsigned>(1), *fls = zalloc<unsigned>(1);
+            P::hc_expand_norm_rows(dX, mix, dS, Xr, fr, flr, R, nullptr);
+            P::hc_sum_expand_norm_rows(dX, mix, dY, dQ1, Xs, fs, fls, R, nullptr);
+            // STRIX_GLM_PF_HC_HOIST 0 / 1 / 2 explicitly (load placement only): single and pair forms
+            float *Xh[3][2], *fh[3][2];
+            unsigned* flh[3][2];
+            for (unsigned h = 0; h < 3; ++h) {
+                for (unsigned pr = 0; pr < 2; ++pr) {
+                    Xh[h][pr] = poison<float>(nf + guard);
+                    fh[h][pr] = poison<float>(R + guard);
+                    flh[h][pr] = zalloc<unsigned>(1);
+                }
+                P::hc_expand_norm_rows_h(h, dX, mix, dS, Xh[h][0], fh[h][0], flh[h][0], R, nullptr);
+                P::hc_sum_expand_norm_rows_h(h, dX, mix, dY, dQ1, Xh[h][1], fh[h][1], flh[h][1], R, nullptr);
+            }
             // the split control (STRIX_GLM_PF_HC_FUSE=2): rr from the unfused expand's output
             float* fc = poison<float>(R + guard);
             P::hc_norm_factor_rows(Xa, fc, R, nullptr);
@@ -1471,11 +1661,25 @@ void test_hc_expand_norm(std::mt19937& g) {
             compare(za, zd, nz, "z v2 vs v1");
             compare(ma, md, nz, "mix v2 vs v1");
             compare(xa, xd, nx, "xc v2 vs v1");
+            const std::size_t payload_before_pair = payload_only;
+            compare(Xr, Xs, nf, "sum-on-load X vs sum2 + fused");
+            compare(fr, fs, R, "sum-on-load rr vs sum2 + fused");
+            const unsigned cr = down(flr, 1)[0], cs = down(fls, 1)[0];
+            for (unsigned h = 0; h < 3; ++h)
+                for (unsigned pr = 0; pr < 2; ++pr) {
+                    const std::string nm = std::string(pr ? "pair" : "single") + " hoist " + std::to_string(h);
+                    compare(Xr, Xh[h][pr], nf, (nm + " X").c_str());
+                    compare(fr, fh[h][pr], R, (nm + " rr").c_str());
+                    ok &= down(flh[h][pr], 1)[0] == cr;
+                }
             const unsigned ca = down(fla, 1)[0], cb = down(flb, 1)[0];
             ok &= ca == cb && (stress != 2 || ca != 0) && (stress < 3 || ca != 0);
+            ok &= cr == cs && (stress < 3 || cr != 0);
             ok &= payload_only == 0 || ca != 0;  // payload-only NaN differences are allowed only in flagged runs
-            check(ok, "mHC expand+norm fused == expand + hc_pre v2 bitwise (X, z, mix, xc, guards, C flag " +
-                      std::to_string(ca) + "/" + std::to_string(cb) + ", NaN-payload-only " + std::to_string(payload_only) +
+            ok &= payload_only == payload_before_pair || cr != 0;
+            check(ok, "mHC expand+norm fused == expand + hc_pre v2 bitwise; sum-on-load pair == sum2 + fused (X, rr, z, mix, xc, guards, C flag " +
+                      std::to_string(ca) + "/" + std::to_string(cb) + " pair " + std::to_string(cr) + "/" + std::to_string(cs) +
+                      ", NaN-payload-only " + std::to_string(payload_only) +
                       "), rows=" + std::to_string(R) +
                       (stress == 0 ? " random" : stress == 1 ? " large/tiny/signed-zero/subnormal" : stress == 2 ? " +inf row"
                        : stress == 3 ? " expanded specials (+-0, subnormal, NaN payloads, +-inf, max)" : " cancellation + norm overflow"));
@@ -1483,9 +1687,85 @@ void test_hc_expand_norm(std::mt19937& g) {
         }
     }
     P::hc_expand_norm_rows(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, 0, nullptr);
+    P::hc_sum_expand_norm_rows(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, 0, nullptr);
     P::hc_pre_rows_normed(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, 0, nullptr);
     P::hc_norm_factor_rows(nullptr, nullptr, 0, nullptr);
     hok(hipGetLastError(), "mHC fused zero rows");
+}
+
+// STRIX_GLM_PF_TEST_ONLY=hcbench: paired timing of the TP2 seam at R rows (default 4096, STRIX_GLM_PF_HCBENCH_ROWS):
+// sum2 + expand<single> vs expand<pair>, per hoist, with p1 in device memory or in host-coherent mapped memory (the
+// exchange's staging RX view). Bitwise-checked against hoist 0 before timing.
+void bench_hc_seam(std::mt19937& g) {
+    constexpr unsigned n = kHc * kHidden;
+    unsigned R = 4096;
+    if (const char* e = std::getenv("STRIX_GLM_PF_HCBENCH_ROWS")) R = static_cast<unsigned>(std::strtoul(e, nullptr, 10));
+    const std::size_t nf = static_cast<std::size_t>(R) * n, nx = static_cast<std::size_t>(R) * kHidden;
+    float *dX = up(rnd(nf, g, 1.0F)), *dY = up(rnd(nx, g, 1.0F));
+    const auto Q1 = rnd(nx, g, 1.0F);
+    float* dQ = up(Q1);
+    float* hQ = nullptr;
+    hok(hipHostMalloc(reinterpret_cast<void**>(&hQ), nx * 4, hipHostMallocMapped | hipHostMallocCoherent), "host coherent");
+    std::memcpy(hQ, Q1.data(), nx * 4);
+    float* hQd = nullptr;
+    hok(hipHostGetDevicePointer(reinterpret_cast<void**>(&hQd), hQ, 0), "host dev ptr");
+    float* fn = up(rnd(static_cast<std::size_t>(kHcMix) * n, g, 0.02F));
+    float* base = up(rnd(kHcMix, g, 0.5F));
+    float* scale = up(rnd(3, g, 1.0F));
+    float *f0 = poison<float>(nf), *z0 = poison<float>(static_cast<std::size_t>(R) * kHcMix), *x0 = poison<float>(nx);
+    float* mix = poison<float>(static_cast<std::size_t>(R) * kHcMix);
+    P::hc_pre_rows_v2(dX, fn, base, scale, f0, z0, mix, x0, R, nullptr);
+    float *S = poison<float>(nx), *Xo = poison<float>(nf), *Xref = poison<float>(nf), *rr = poison<float>(R), *rref = poison<float>(R);
+    unsigned* fl = zalloc<unsigned>(1);
+    hok(hipDeviceSynchronize(), "sync");
+    hipEvent_t a, b;
+    hok(hipEventCreate(&a), "ev");
+    hok(hipEventCreate(&b), "ev");
+    constexpr int reps = 30;
+    for (int mem = 0; mem < 2; ++mem) {
+        const float* p1 = mem ? hQd : dQ;
+        t_sum2_kernel<<<static_cast<unsigned>((nx + 255) / 256), 256>>>(dY, p1, S, nx);
+        P::hc_expand_norm_rows_h(0, dX, mix, S, Xref, rref, fl, R, nullptr);
+        const auto Hx = down(Xref, nf), Hr = down(rref, R);
+        for (unsigned h = 0; h < 3; ++h) {
+            for (int pr = 0; pr < 2; ++pr) {
+                auto run = [&] {
+                    if (pr) P::hc_sum_expand_norm_rows_h(h, dX, mix, dY, p1, Xo, rr, fl, R, nullptr);
+                    else {
+                        t_sum2_kernel<<<static_cast<unsigned>((nx + 255) / 256), 256>>>(dY, p1, S, nx);
+                        P::hc_expand_norm_rows_h(h, dX, mix, S, Xo, rr, fl, R, nullptr);
+                    }
+                };
+                run();
+                const bool same = bits_eq(down(Xo, nf), Hx) && bits_eq(down(rr, R), Hr);
+                check(same, std::string("hcbench bitwise ") + (pr ? "pair" : "sum2+single") + " hoist " + std::to_string(h) +
+                                (mem ? " p1 host-coherent" : " p1 device"));
+                float best = 1e30F, tot = 0;
+                for (int i = 0; i < reps; ++i) {
+                    hok(hipEventRecord(a, nullptr), "ev");
+                    run();
+                    hok(hipEventRecord(b, nullptr), "ev");
+                    const float ms = ms_between(a, b);
+                    best = std::min(best, ms);
+                    tot += ms;
+                }
+                std::printf("hcbench R=%u p1=%s %-11s hoist %u: median-ish mean %.3f ms, min %.3f ms\n", R, mem ? "host-coh" : "device",
+                            pr ? "pair" : "sum2+single", h, tot / reps, best);
+                std::fflush(stdout);
+            }
+        }
+        // sum2 alone, for the split
+        float best = 1e30F;
+        for (int i = 0; i < reps; ++i) {
+            hok(hipEventRecord(a, nullptr), "ev");
+            t_sum2_kernel<<<static_cast<unsigned>((nx + 255) / 256), 256>>>(dY, p1, S, nx);
+            hok(hipEventRecord(b, nullptr), "ev");
+            best = std::min(best, ms_between(a, b));
+        }
+        std::printf("hcbench R=%u p1=%s sum2 alone: min %.3f ms\n", R, mem ? "host-coh" : "device", best);
+    }
+    hok(hipHostFree(hQ), "host free");
+    free_all();
 }
 
 int main(int argc, char** argv) {
@@ -1499,6 +1779,7 @@ int main(int argc, char** argv) {
     const bool bench_dense = want_timing && dense_bench != nullptr && std::string(dense_bench) == "1";
     if (const char* only = std::getenv("STRIX_GLM_PF_TEST_ONLY"); only != nullptr && std::string(only) == "dense") {
         test_dense_rows_v2(g, bench_dense);  // fixture-free; CASES_DIR may be a placeholder
+        test_dense_rows_v3(g, bench_dense);
         std::printf("checks: %d failures: %d\n", checks, failures);
         return failures ? 1 : 0;
     }
@@ -1512,8 +1793,15 @@ int main(int argc, char** argv) {
         std::printf("checks: %d failures: %d\n", checks, failures);
         return failures ? 1 : 0;
     }
+    if (const char* only = std::getenv("STRIX_GLM_PF_TEST_ONLY"); only != nullptr && std::string(only) == "hcbench") {
+        test_hc_expand_norm(g);  // the bitwise gate first (all stress inputs, hoist 0 / 1 / 2)
+        if (failures == 0) bench_hc_seam(g);
+        std::printf("checks: %d failures: %d\n", checks, failures);
+        return failures ? 1 : 0;
+    }
     test_dense_rows(argv[1], g);
     test_dense_rows_v2(g, bench_dense);
+    test_dense_rows_v3(g, bench_dense);
     test_hc_rows(argv[1], g);
     test_hc_rows_v2(argv[1], g);
     test_hc_mixnorm(g);

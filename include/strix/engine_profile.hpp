@@ -1,5 +1,7 @@
 #pragma once
 
+#include "strix/fnv.hpp"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -45,6 +47,7 @@ struct Lever {
     std::string_view target;                // declared target of a pending column; empty: the value
     std::string_view off;                   // explicit value that switches the lever off
     std::string_view source;                // qualification receipt, or what a pending column waits for
+    bool native_option = false;            // an adapter's native CLI parser owns validation/export
     std::array<bool, 3> provisional{};      // selected ahead of qualification; still requires `runnable`; wins over `ready` until the row is flipped
 };
 
@@ -73,6 +76,11 @@ inline const char* name(Name value) {
 }
 
 enum class Status { set, explicit_env, explicit_cli, builtin, pending, unqualified, off, provisional };
+// Shared column admission; adapters retain asset, route and baseline policies.
+inline Status admit_column(bool ready, bool runnable, bool allow_pending, bool provisional = false) {
+    if (!ready && !((provisional || allow_pending) && runnable)) return Status::pending;
+    return provisional ? Status::provisional : ready ? Status::set : Status::unqualified;
+}
 inline const char* status_name(Status value) {
     switch (value) {
     case Status::set: return "profile";
@@ -120,6 +128,8 @@ struct Entry {
     std::string value;   // effective value (explicit, profile or builtin)
     Status status = Status::builtin;
     std::string target;  // pending: the declared target that is not applied
+    bool cli_override = false;  // adapter provenance; does not enter the rank fingerprint
+    std::string reason;         // adapter admission explanation
 };
 
 struct Resolution {
@@ -209,8 +219,7 @@ struct Resolution {
     [[nodiscard]] std::uint64_t fingerprint() const {
         std::uint64_t h = 1469598103934665603ULL;
         const auto mix = [&h](std::string_view s) {
-            for (const char c : s) { h ^= static_cast<unsigned char>(c); h *= 1099511628211ULL; }
-            h ^= 0xFFU; h *= 1099511628211ULL;  // field separator
+            h = host_fnv::byte(host_fnv::text(s, h), 0xFFU);  // preserve legacy seed and separator
         };
         mix(name(profile));
         mix(qualification());
@@ -252,6 +261,31 @@ inline void check_peer(const Resolution& resolution, const HostExchange& exchang
 }
 
 using Lookup = std::function<const char*(const char*)>;
+inline const char* environment(const Lookup& env, std::string_view key);
+
+// Shared defaults row; adapters retain application-specific admission and exports.
+struct DefaultItem {
+    const char* name;
+    const char* env;
+    const char* on;
+    const char* off;
+    const char* receipt;
+    bool app_sets = true;
+    bool in_baseline = true;
+};
+enum class DefaultSource { on, baseline, env, cli };
+struct DefaultValue {
+    std::string value;
+    DefaultSource source = DefaultSource::on;
+};
+inline DefaultValue resolve_default(const DefaultItem& row, bool baseline, const Lookup& env,
+                                    std::optional<std::string_view> cli = std::nullopt) {
+    if (cli) return {std::string(*cli), DefaultSource::cli};
+    if (const char* value = environment(env, row.env))
+        return {value, DefaultSource::env};
+    if (baseline && row.in_baseline) return {row.off, DefaultSource::baseline};
+    return {row.on, DefaultSource::on};
+}
 using Pairs = std::vector<std::pair<std::string, std::string>>;
 struct Inputs {
     std::optional<Name> profile;  // --profile; none: default
@@ -286,19 +320,21 @@ inline Resolution resolve(const Engine& engine, const Inputs& inputs) {
         for (const auto& [key, value] : inputs.cli) if (key == lever.name) cli = &value;
         const char* env = lever.env.empty() ? nullptr : environment(inputs.env, lever.env);
         const auto wanted = lever.value[column];
-        Entry entry{&lever, std::string(lever.builtin), Status::builtin, {}};
+        Entry entry{&lever, std::string(lever.builtin), Status::builtin, {}, false, {}};
         if (cli != nullptr || env != nullptr) {  // a set variable is explicit even when empty (the app judges it)
             entry.value = cli != nullptr ? *cli : std::string(env);
             entry.status = cli != nullptr ? Status::explicit_cli : Status::explicit_env;
             if ((!lever.off.empty() && entry.value == lever.off) || entry.value == "off") entry.status = Status::off;
         } else if (wanted.empty() || wanted == lever.builtin) {
             // builtin (the default column always is: default exports nothing)
-        } else if (!lever.ready[column] && !((lever.provisional[column] || out.allow_pending) && lever.runnable[column])) {
+        } else if (admit_column(lever.ready[column], lever.runnable[column], out.allow_pending,
+                                lever.provisional[column]) == Status::pending) {
             entry.status = Status::pending;
             entry.target = std::string(lever.target.empty() ? wanted : lever.target);
         } else {
             entry.value = std::string(wanted);
-            entry.status = lever.provisional[column] ? Status::provisional : lever.ready[column] ? Status::set : Status::unqualified;
+            entry.status = admit_column(lever.ready[column], lever.runnable[column], out.allow_pending,
+                                         lever.provisional[column]);
         }
         out.entries.push_back(std::move(entry));
     }
@@ -383,5 +419,73 @@ inline void take_options(const Engine& engine, std::vector<std::string>& args, I
     }
     args = std::move(kept);
 }
+
+inline std::string hex_identity(std::uint64_t value) {
+    char buf[17];
+    std::snprintf(buf, sizeof buf, "%016llx", static_cast<unsigned long long>(value));
+    return buf;
+}
+
+// Numerical compatibility and execution provenance are deliberately independent.
+// Empty fields mean unknown, never a proof that two executions are compatible.
+struct NumericalIdentity {
+    std::string arithmetic_contract;
+    std::string model_sha256;
+    std::string pack_hash;
+    std::string table_hash;
+    std::string state_format;
+    std::string prefill_lineage;
+    std::string reduction_plan;
+
+    [[nodiscard]] std::uint64_t id() const {
+        auto h = host_fnv::field(host_fnv::offset64, "strix-numerical-identity/v1");
+        for (const auto* value : {&arithmetic_contract, &model_sha256, &pack_hash, &table_hash,
+                                  &state_format, &prefill_lineage, &reduction_plan})
+            h = host_fnv::field(h, *value);
+        return h;
+    }
+    [[nodiscard]] std::string json() const {
+        return "{\"id\":" + json_string(hex_identity(id())) +
+            ",\"arithmetic_contract\":" + json_string(arithmetic_contract) +
+            ",\"model_sha256\":" + json_string(model_sha256) +
+            ",\"pack_hash\":" + json_string(pack_hash) +
+            ",\"table_hash\":" + json_string(table_hash) +
+            ",\"state_format\":" + json_string(state_format) +
+            ",\"prefill_lineage\":" + json_string(prefill_lineage) +
+            ",\"reduction_plan\":" + json_string(reduction_plan) + "}";
+    }
+};
+
+struct ExecutionReceipt {
+    std::string engine;
+    NumericalIdentity identity;
+    std::string implementation;
+    std::string build;
+    std::string kernel;
+    std::string device;
+    std::string topology;
+    std::string command;  // canonical invocation when supplied by the harness
+    // Ordered named digests; duplicate names are rejected rather than ambiguous JSON.
+    std::vector<std::pair<std::string, std::string>> digests;
+
+    [[nodiscard]] std::string json() const {
+        std::string hashes;
+        for (std::size_t i = 0; i < digests.size(); ++i) {
+            for (std::size_t j = 0; j < i; ++j)
+                if (digests[j].first == digests[i].first)
+                    throw std::invalid_argument("duplicate receipt digest: " + digests[i].first);
+            if (!hashes.empty()) hashes += ',';
+            hashes += json_string(digests[i].first) + ':' + json_string(digests[i].second);
+        }
+        return "{\"schema\":\"strix-engine-receipt/v1\",\"engine\":" + json_string(engine) +
+            ",\"identity\":" + identity.json() +
+            ",\"implementation\":" + json_string(implementation) +
+            ",\"build\":" + json_string(build) + ",\"kernel\":" + json_string(kernel) +
+            ",\"device\":" + json_string(device) + ",\"topology\":" + json_string(topology) +
+            ",\"command\":" + json_string(command) +
+            ",\"digests\":{" + hashes + "}}";
+    }
+    [[nodiscard]] std::string witness() const { return "strix-engine-witness " + json() + "\n"; }
+};
 
 }  // namespace strix::profile

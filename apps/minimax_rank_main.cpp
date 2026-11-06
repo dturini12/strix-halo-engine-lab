@@ -198,7 +198,7 @@ Metrics compare(const std::vector<float>& a, const std::vector<float>& ref, std:
         tok[i] = std::sqrt(n2 / std::max(d2, 1e-300));
     }
     std::sort(tok.begin(), tok.end());
-    return {std::sqrt(num / den), tok[t / 2], tok[std::min(t - 1, t * 99 / 100)], tok[t - 1]};
+    return {std::sqrt(num / den), (tok[(t - 1) / 2] + tok[t / 2]) / 2.0, tok[std::min(t - 1, t * 99 / 100)], tok[t - 1]};
 }
 
 double median(std::vector<double> v) {

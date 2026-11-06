@@ -286,7 +286,9 @@ int main(int argc, char** argv) {
                     "max(gpu/median(site))(row)\n");
         const auto median = [](std::vector<double> v) {
             std::sort(v.begin(), v.end());
-            return v.empty() ? 0.0 : v[v.size() / 2];
+            if (v.empty()) return 0.0;
+            const auto h = v.size() / 2;
+            return v.size() % 2 ? v[h] : (v[h - 1] + v[h]) / 2.0;
         };
         for (int L = l0; L <= l1; ++L) {
             char tag[16];

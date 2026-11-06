@@ -1,4 +1,4 @@
-#include "profile.hpp"
+#include "strix/profiles/gemma4.hpp"
 
 #include <cstdlib>
 #include <iostream>
@@ -121,7 +121,7 @@ constexpr Lever table[] = {
      .kind = Kind::exact, .apps = prefill_bench,
      .source = "whole-chunk canonical attention, byte-equal to the 8-row loop"},
 };
-const char* environment(const Lookup& env, const char* name) { return env ? env(name) : std::getenv(name); }
+using strix::profile::environment;
 void escape(std::string& out, std::string_view text) {
     out += '"';
     for (const char c : text) {
@@ -155,27 +155,17 @@ const char* status_name(Status status) {
     }
     return "unknown";
 }
-const char* kind_name(Kind kind) {
-    switch (kind) {
-    case Kind::exact: return "exact";
-    case Kind::bit_changing: return "bit-changing";
-    case Kind::pack: return "pack";
-    }
-    return "unknown";
-}
 Name parse(std::string_view value) {
-    if (value == "default") return Name::standard;
-    if (value == "fast") return Name::fast;
-    if (value == "quality") return Name::quality;
-    throw std::invalid_argument("profile must be default, fast or quality");
+    // Preserve the app's legacy diagnostic while sharing the name parser.
+    if (!strix::profile::is_name(value)) throw std::invalid_argument("profile must be default, fast or quality");
+    return strix::profile::parse(value);
 }
-const char* name(Name profile) {
-    switch (profile) {
-    case Name::standard: return "default";
-    case Name::fast: return "fast";
-    case Name::quality: return "quality";
-    }
-    return "unknown";
+strix::profile::ExecutionReceipt host_receipt(strix::profile::NumericalIdentity known) {
+    strix::profile::ExecutionReceipt receipt;
+    receipt.engine = "gemma4";
+    receipt.implementation = "gemma4-profile";
+    receipt.identity = std::move(known);
+    return receipt;
 }
 const char* app_name(App app) {
     switch (app) {
@@ -297,8 +287,10 @@ Resolution resolve(Name profile, App app, const Inputs& inputs, std::span<const 
             else { entry.value = std::string(lever.builtin); entry.status = Status::absent; }
         } else if (wanted.empty()) {
             continue;
-        } else if (!lever.ready[column]) {
-            if (out.allow_pending && lever.runnable[column]) {
+        } else if (const auto admission = strix::profile::admit_column(
+                       lever.ready[column], lever.runnable[column], out.allow_pending);
+                   admission != strix::profile::Status::set) {
+            if (admission == strix::profile::Status::unqualified) {
                 // Benchmarking only: run the pending implementation and stamp the receipt.
                 entry.status = Status::unqualified;
                 if (lever.asset) {

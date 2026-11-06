@@ -70,9 +70,23 @@ void mla_attention_rows_versions(const dev::DsaSlot& slot, const std::uint32_t* 
 // VALU GEMM (each weight tile read once per 64 rows instead of once per row). `in` must be a multiple of 32.
 void dense_rows(const float* x, const void* w, dev::WType wt, unsigned in, unsigned o0, unsigned n, float* y, unsigned rows,
                 hipStream_t s);
-// Read-once STRIX_GLM_PF_DENSE_ROWS=2 (default) | 1; explicit selector bypasses the environment for bitwise gates/timing.
+// Read-once STRIX_GLM_PF_DENSE_ROWS=3 (default) | 2 | 1; explicit selector bypasses the environment for bitwise gates/timing.
+// v3 = v2's chains in a 128 x 64 tile for grouped projections (dense_rows_group); single calls keep the v2 tile.
+// Same bits as v2 and v1.
 void dense_rows_versioned(const float* x, const void* w, dev::WType wt, unsigned in, unsigned o0, unsigned n, float* y,
                           unsigned rows, hipStream_t s, unsigned version);
+// Up to kDenseGroupMax projections of the same x (same in, rows and weight type) in one launch under v3; v1 / v2 run them
+// one by one. Each output equals dense_rows of that projection bit for bit.
+inline constexpr unsigned kDenseGroupMax = 3;
+struct DenseProj {
+    const void* w;
+    unsigned o0, n;
+    float* y;
+};
+void dense_rows_group(const float* x, dev::WType wt, unsigned in, const DenseProj* p, unsigned count, unsigned rows, hipStream_t s);
+// Explicit version and v3 tile (rt 32 / 64 / 128 rows with c 32 / 64 columns; 0 / 0 = automatic) for gates and timing.
+void dense_rows_group_versioned(const float* x, dev::WType wt, unsigned in, const DenseProj* p, unsigned count, unsigned rows,
+                                hipStream_t s, unsigned version, unsigned rt = 0, unsigned c = 0);
 
 // ---- mHC pre for many rows: = dev::hc_pre bit for bit (same outputs F, mix, x_collapsed), with the 24 R1 chains over
 // the 16384 normalized values as a VALU GEMM. z: workspace [rows][24]. F remains materialized on both paths.
@@ -92,6 +106,19 @@ void hc_expand_norm_rows(const float* X, const float* mix, const float* y, float
                          hipStream_t s);
 void hc_pre_rows_normed(const float* X, const float* fn, const float* base, const float* scale, const float* rr, float* z, float* mix,
                         float* xc, unsigned rows, hipStream_t s);
+// STRIX_GLM_PF_SUMEXP (default 1; =0 restores the exchange's sum2 then hc_expand_norm_rows): the pipelined TP2 seam hands
+// both partials to the fused expand, which forms y = y0 + y1 (rank order, the sum2 expression) on load. Same bits.
+// Enabled only with the fused (non-split) STRIX_GLM_PF_HC_FUSE form.
+bool hc_sum_expand_enabled();
+void hc_sum_expand_norm_rows(const float* X, const float* mix, const float* y0, const float* y1, float* Xo, float* rr, unsigned* flag,
+                             unsigned rows, hipStream_t s);
+// STRIX_GLM_PF_HC_HOIST (default 1; 0 = loads inside each step, 2 = 1 plus restrict): where the fused expand issues its loads (1: y / y0 + y1 into registers before the first
+// step; 2: also restrict row pointers so later X loads issue early). Same expressions in the same order: same bits.
+unsigned hc_expand_hoist();
+void hc_expand_norm_rows_h(unsigned hoist, const float* X, const float* mix, const float* y, float* Xo, float* rr, unsigned* flag,
+                           unsigned rows, hipStream_t s);
+void hc_sum_expand_norm_rows_h(unsigned hoist, const float* X, const float* mix, const float* y0, const float* y1, float* Xo, float* rr,
+                               unsigned* flag, unsigned rows, hipStream_t s);
 
 // Explicit versions for bitwise gates and paired timing, independent of the cached environment selector.
 void hc_pre_rows_v1(const float* X, const float* fn, const float* base, const float* scale, float* F, float* z, float* mix, float* xc,

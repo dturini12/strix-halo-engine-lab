@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 
 namespace strix::glm::pf {
 
@@ -2070,12 +2071,155 @@ void dense_rows_v2_launch(const float* x, const void* w, dev::WType wt, unsigned
         dense_rows_v2_kernel<C, dev::WType::F32><<<grid, C * 4, 0, s>>>(x, w, in, o0, n, y, rows);
 }
 
+// Dense v3: v2's per-thread chains (ascending k from +0, one fmaf per step, same expressions) with a row tile RT of
+// 128 / 64 / 32 rows (RT / 16 rows per thread) and a column tile C of 64 / 32, so small-N calls fill the GPU, and up to
+// kDenseGroupMax projections that share x in one launch (blockIdx.y walks their column blocks in order). Same bits as v2.
+struct DenseGroupArgs {
+    const void* w[kDenseGroupMax];
+    float* y[kDenseGroupMax];
+    unsigned o0[kDenseGroupMax], n[kDenseGroupMax], first[kDenseGroupMax + 1];  // first[p] = first column block of p
+    unsigned count;
+};
+template <unsigned RT, unsigned C, dev::WType WT>
+__global__ __launch_bounds__(C * 4) void dense_rows_v3_kernel(const float* x, unsigned in, unsigned rows, DenseGroupArgs g) {
+    constexpr unsigned K = 32, NT = C * 4, RI = RT / 16;
+    static_assert(RI == 2 || RI == 4 || RI == 8, "dense v3 row tile");
+    __shared__ alignas(16) float as[K][RT + 4];
+    __shared__ alignas(16) float ws[K][C + 4];
+    unsigned p = 0;
+    while (p + 1 < g.count && blockIdx.y >= g.first[p + 1]) ++p;
+    const void* w = g.w[p];
+    float* y = g.y[p];
+    const unsigned o0 = g.o0[p], n = g.n[p];
+    const unsigned tid = threadIdx.x, tr = tid / (C / 4), tc = tid % (C / 4);
+    const unsigned r0 = blockIdx.x * RT, c0 = (blockIdx.y - g.first[p]) * C;
+    float acc[RI][4];
+#pragma unroll
+    for (unsigned i = 0; i < RI; ++i)
+#pragma unroll
+        for (unsigned j = 0; j < 4; ++j) acc[i][j] = 0.0F;
+    for (unsigned k0 = 0; k0 < in; k0 += K) {
+        __syncthreads();
+        for (unsigned v = tid; v < RT * K / 4; v += NT) {
+            const unsigned rr = v / (K / 4), kk = 4 * (v % (K / 4)), r = r0 + rr;
+            float4 a{0.0F, 0.0F, 0.0F, 0.0F};
+            if (r < rows) {
+                const float* q = x + static_cast<std::size_t>(r) * in + k0 + kk;
+                if ((reinterpret_cast<std::uintptr_t>(x) & 15U) == 0)
+                    a = *reinterpret_cast<const float4*>(q);
+                else
+                    a = float4{q[0], q[1], q[2], q[3]};
+            }
+            as[kk][rr] = a.x;
+            as[kk + 1][rr] = a.y;
+            as[kk + 2][rr] = a.z;
+            as[kk + 3][rr] = a.w;
+        }
+        for (unsigned v = tid; v < C * K / 2; v += NT) {
+            const unsigned cc = v / (K / 2), kk = 2 * (v % (K / 2)), o = c0 + cc;
+            float a = 0.0F, b = 0.0F;
+            if (o < n) {
+                const std::size_t at = static_cast<std::size_t>(o0 + o) * in + k0 + kk;
+                if constexpr (WT == dev::WType::F32) {
+                    a = static_cast<const float*>(w)[at];
+                    b = static_cast<const float*>(w)[at + 1];
+                } else {
+                    const auto* wp = static_cast<const std::uint16_t*>(w) + at;
+                    const std::uint32_t q = (reinterpret_cast<std::uintptr_t>(w) & 3U) == 0
+                        ? *reinterpret_cast<const std::uint32_t*>(wp)
+                        : static_cast<std::uint32_t>(wp[0]) | (static_cast<std::uint32_t>(wp[1]) << 16);
+                    const auto lo = static_cast<std::uint16_t>(q), hi = static_cast<std::uint16_t>(q >> 16);
+                    if constexpr (WT == dev::WType::F16) {
+                        a = f16_to_float(lo);
+                        b = f16_to_float(hi);
+                    } else {
+                        a = bf16_to_float(lo);
+                        b = bf16_to_float(hi);
+                    }
+                }
+            }
+            ws[kk][cc] = a;
+            ws[kk + 1][cc] = b;
+        }
+        __syncthreads();
+#pragma unroll 4
+        for (unsigned kk = 0; kk < K; ++kk) {
+            float a[RI];
+            if constexpr (RI == 2) {
+                const float2 a0 = *reinterpret_cast<const float2*>(&as[kk][tr * RI]);
+                a[0] = a0.x;
+                a[1] = a0.y;
+            } else {
+#pragma unroll
+                for (unsigned h = 0; h < RI / 4; ++h) {
+                    const float4 a4 = *reinterpret_cast<const float4*>(&as[kk][tr * RI + 4 * h]);
+                    a[4 * h] = a4.x;
+                    a[4 * h + 1] = a4.y;
+                    a[4 * h + 2] = a4.z;
+                    a[4 * h + 3] = a4.w;
+                }
+            }
+            const float4 b4 = *reinterpret_cast<const float4*>(&ws[kk][tc * 4]);
+            const float b[4] = {b4.x, b4.y, b4.z, b4.w};
+#pragma unroll
+            for (unsigned i = 0; i < RI; ++i)
+#pragma unroll
+                for (unsigned j = 0; j < 4; ++j) acc[i][j] = __builtin_fmaf(a[i], b[j], acc[i][j]);
+        }
+    }
+#pragma unroll
+    for (unsigned i = 0; i < RI; ++i) {
+        const unsigned r = r0 + tr * RI + i;
+        if (r >= rows) continue;
+#pragma unroll
+        for (unsigned j = 0; j < 4; ++j) {
+            const unsigned o = c0 + tc * 4 + j;
+            if (o < n) y[static_cast<std::size_t>(r) * n + o] = acc[i][j];
+        }
+    }
+}
+
+template <unsigned RT, unsigned C>
+void dense_rows_v3_launch(const float* x, dev::WType wt, unsigned in, unsigned rows, DenseGroupArgs g, hipStream_t s) {
+    g.first[0] = 0;
+    for (unsigned p = 0; p < g.count; ++p) g.first[p + 1] = g.first[p] + (g.n[p] + C - 1) / C;
+    const dim3 grid((rows + RT - 1) / RT, g.first[g.count]);
+    if (wt == dev::WType::F16)
+        dense_rows_v3_kernel<RT, C, dev::WType::F16><<<grid, C * 4, 0, s>>>(x, in, rows, g);
+    else if (wt == dev::WType::BF16)
+        dense_rows_v3_kernel<RT, C, dev::WType::BF16><<<grid, C * 4, 0, s>>>(x, in, rows, g);
+    else
+        dense_rows_v3_kernel<RT, C, dev::WType::F32><<<grid, C * 4, 0, s>>>(x, in, rows, g);
+}
+
+void dense_rows_v3_dispatch(const float* x, dev::WType wt, unsigned in, unsigned rows, const DenseGroupArgs& g, unsigned rt,
+                            unsigned c, hipStream_t s) {
+    if (c == 64) {
+        if (rt == 128) dense_rows_v3_launch<128, 64>(x, wt, in, rows, g, s);
+        else if (rt == 64) dense_rows_v3_launch<64, 64>(x, wt, in, rows, g, s);
+        else dense_rows_v3_launch<32, 64>(x, wt, in, rows, g, s);
+    } else {
+        if (rt == 128) dense_rows_v3_launch<128, 32>(x, wt, in, rows, g, s);
+        else if (rt == 64) dense_rows_v3_launch<64, 32>(x, wt, in, rows, g, s);
+        else dense_rows_v3_launch<32, 32>(x, wt, in, rows, g, s);
+    }
+}
+
+// Automatic v3 tile: 128 rows x 64 columns for every grouped shape. Measured on the grouped production shapes (KDA,
+// DSA, o0 groups, R 4096 / 8192) it is the fastest tile, padded column tails included; smaller tiles chosen for CTA
+// count were slower (more weight re-reads per row).
+void dense_rows_v3_auto(unsigned, const unsigned*, unsigned, unsigned& rt, unsigned& c) {
+    rt = 128;
+    c = 64;
+}
+
 unsigned dense_rows_version() {
     static const unsigned v = [] {
         const char* e = std::getenv("STRIX_GLM_PF_DENSE_ROWS");
-        if (e == nullptr || std::string(e) == "2") return 2U;
+        if (e == nullptr || std::string(e) == "3") return 3U;
+        if (std::string(e) == "2") return 2U;
         if (std::string(e) == "1") return 1U;
-        throw std::invalid_argument("STRIX_GLM_PF_DENSE_ROWS must be 1 or 2");
+        throw std::invalid_argument("STRIX_GLM_PF_DENSE_ROWS must be 1, 2 or 3");
     }();
     return v;
 }
@@ -2109,22 +2253,39 @@ __global__ __launch_bounds__(256) void hc_norm_factor_rows_kernel(const float* X
 // outputs it owns in the norm (element l + 256 j, j = stream * 16 + block) and runs the same fmaf chain in ascending j
 // and the same lds_tree; it stores rr per row and F is never materialised: the chain kernel forms F = X * rr on load
 // (one product, as hc_norm_rows writes it). The file is built with -ffp-contract=off, as is the expand kernel.
-__global__ __launch_bounds__(256) void hc_expand_norm_rows_kernel(const float* X, const float* mix, const float* y, float* Xo,
-                                                                  float* rr_out, unsigned* flag) {
+// kPair (STRIX_GLM_PF_SUMEXP): y is the TP2 sum y0 + y1 in rank order (the exchange's sum2 expression), formed on load;
+// the summed rows are never stored.
+// kHoist (STRIX_GLM_PF_HC_HOIST, load placement only; every expression and its order are unchanged):
+//   0: y (or y0 + y1) is loaded inside each of the B steps, behind the previous step's stores (the stores may alias).
+//   1: all B y values are loaded (and summed) into registers before the first step.
+//   2: as 1, and the row pointers are restrict-qualified so the X loads of later steps may also be issued early.
+template <bool kPair, unsigned kHoist = 0>
+__global__ __launch_bounds__(256) void hc_expand_norm_rows_kernel(const float* X, const float* mix, const float* y, const float* y1,
+                                                                  float* Xo, float* rr_out, unsigned* flag) {
     constexpr unsigned n = kHc * kHidden, B = kHidden / 256;
     __shared__ float s[256];
     const unsigned r = blockIdx.x, l = threadIdx.x;
     const float* m = mix + static_cast<std::size_t>(r) * kHcMix;
     const float* c = m + 2 * kHc;
-    const float* Xr = X + static_cast<std::size_t>(r) * n;
-    float* Xor = Xo + static_cast<std::size_t>(r) * n;
+    using CP = std::conditional_t<kHoist == 2, const float* __restrict__, const float*>;
+    using OP = std::conditional_t<kHoist == 2, float* __restrict__, float*>;
+    const CP Xr = X + static_cast<std::size_t>(r) * n;
+    const OP Xor = Xo + static_cast<std::size_t>(r) * n;
     float v[kHc - 1][B];  // streams 1 .. 3; stream 0 enters the chain as produced (its terms come first in ascending j)
+    float yv[kHoist != 0 ? B : 1];
+    if constexpr (kHoist != 0) {
+        const float* __restrict__ yr = y + static_cast<std::size_t>(r) * kHidden;
+        const float* __restrict__ y1r = kPair ? y1 + static_cast<std::size_t>(r) * kHidden : nullptr;
+#pragma unroll
+        for (unsigned b = 0; b < B; ++b) yv[b] = kPair ? yr[b * 256 + l] + y1r[b * 256 + l] : yr[b * 256 + l];
+    }
     float a = 0.0F;
     bool bad = false;
 #pragma unroll
     for (unsigned b = 0; b < B; ++b) {
         const unsigned d = b * 256 + l;
-        const float yd = y[static_cast<std::size_t>(r) * kHidden + d];
+        const std::size_t yi = static_cast<std::size_t>(r) * kHidden + d;
+        const float yd = kHoist != 0 ? yv[b] : kPair ? y[yi] + y1[yi] : y[yi];
 #pragma unroll
         for (unsigned i = 0; i < kHc; ++i) {
             const float mx = ((c[0 * kHc + i] * Xr[d] + c[1 * kHc + i] * Xr[kHidden + d]) + c[2 * kHc + i] * Xr[2 * kHidden + d]) +
@@ -2540,9 +2701,12 @@ void dense_rows(const float* x, const void* w, dev::WType wt, unsigned in, unsig
 
 void dense_rows_versioned(const float* x, const void* w, dev::WType wt, unsigned in, unsigned o0, unsigned n, float* y,
                           unsigned rows, hipStream_t s, unsigned version) {
-    if (version != 1 && version != 2) throw std::invalid_argument("glm pf dense_rows version must be 1 or 2");
+    if (version < 1 || version > 3) throw std::invalid_argument("glm pf dense_rows version must be 1, 2 or 3");
     if (rows == 0 || n == 0) return;
     if (in == 0 || in % kGK) throw std::runtime_error("glm pf dense_rows: in must be a positive multiple of 32");
+    // Version 3 only changes grouped calls (dense_rows_group): a single projection measured at parity with v2 (router,
+    // KDA f_b), so single calls keep the v2 tile under version 3.
+    if (version == 3) version = 2;
     // v2 for in <= 4096 (KDA / indexer / router shapes); the 16384-long F32 chains of the legacy mHC path keep the v1 tile.
     if (version == 1 || in > 4096)
         dense_rows_kernel<<<dim3((rows + kGT - 1) / kGT, (n + kGT - 1) / kGT), 256, 0, s>>>(x, w, wt, in, o0, n, y, rows);
@@ -2551,6 +2715,38 @@ void dense_rows_versioned(const float* x, const void* w, dev::WType wt, unsigned
     else
         dense_rows_v2_launch<32>(x, w, wt, in, o0, n, y, rows, s);
     ok(hipGetLastError(), "glm pf dense_rows");
+}
+
+void dense_rows_group(const float* x, dev::WType wt, unsigned in, const DenseProj* p, unsigned count, unsigned rows, hipStream_t s) {
+    dense_rows_group_versioned(x, wt, in, p, count, rows, s, dense_rows_version());
+}
+
+void dense_rows_group_versioned(const float* x, dev::WType wt, unsigned in, const DenseProj* p, unsigned count, unsigned rows,
+                                hipStream_t s, unsigned version, unsigned rt, unsigned c) {
+    if (version < 1 || version > 3) throw std::invalid_argument("glm pf dense_rows version must be 1, 2 or 3");
+    if (count == 0 || count > kDenseGroupMax) throw std::invalid_argument("glm pf dense_rows_group: 1..kDenseGroupMax projections");
+    if ((rt != 0 && rt != 32 && rt != 64 && rt != 128) || (c != 0 && c != 32 && c != 64) || ((rt == 0) != (c == 0)))
+        throw std::invalid_argument("glm pf dense_rows_group: tile rt 32/64/128 with c 32/64, or both 0 (auto)");
+    if (version != 3 || in > 4096) {
+        for (unsigned i = 0; i < count; ++i) dense_rows_versioned(x, p[i].w, wt, in, p[i].o0, p[i].n, p[i].y, rows, s, version);
+        return;
+    }
+    if (rows == 0) return;
+    if (in == 0 || in % kGK) throw std::runtime_error("glm pf dense_rows: in must be a positive multiple of 32");
+    DenseGroupArgs g{};
+    unsigned ns[kDenseGroupMax];
+    for (unsigned i = 0; i < count; ++i) {
+        if (p[i].n == 0) continue;  // an empty projection writes nothing
+        g.w[g.count] = p[i].w;
+        g.y[g.count] = p[i].y;
+        g.o0[g.count] = p[i].o0;
+        g.n[g.count] = ns[g.count] = p[i].n;
+        ++g.count;
+    }
+    if (g.count == 0) return;
+    if (rt == 0) dense_rows_v3_auto(rows, ns, g.count, rt, c);
+    dense_rows_v3_dispatch(x, wt, in, rows, g, rt, c, s);
+    ok(hipGetLastError(), "glm pf dense_rows v3");
 }
 
 void hc_pre_rows_v1(const float* X, const float* fn, const float* base, const float* scale, float* F, float* z, float* mix, float* xc,
@@ -2643,11 +2839,61 @@ void hc_norm_factor_rows(const float* X, float* rr, unsigned rows, hipStream_t s
     ok(hipGetLastError(), "glm pf hc_norm_factor_rows");
 }
 
+namespace {
+template <bool kPair>
+void launch_expand_norm(unsigned hoist, const float* X, const float* mix, const float* y0, const float* y1, float* Xo, float* rr,
+                        unsigned* flag, unsigned rows, hipStream_t s) {
+    if (hoist == 0) hc_expand_norm_rows_kernel<kPair, 0><<<rows, 256, 0, s>>>(X, mix, y0, y1, Xo, rr, flag);
+    else if (hoist == 1) hc_expand_norm_rows_kernel<kPair, 1><<<rows, 256, 0, s>>>(X, mix, y0, y1, Xo, rr, flag);
+    else if (hoist == 2) hc_expand_norm_rows_kernel<kPair, 2><<<rows, 256, 0, s>>>(X, mix, y0, y1, Xo, rr, flag);
+    else throw std::invalid_argument("hc expand hoist must be 0, 1 or 2");
+}
+}  // namespace
+
+unsigned hc_expand_hoist() {
+    static const unsigned h = [] {
+        const char* e = std::getenv("STRIX_GLM_PF_HC_HOIST");
+        if (e == nullptr || *e == '\0') return 1U;  // default 1; load placement only (exact by construction); 0 = loads inside each step
+        const std::string v(e);
+        if (v != "0" && v != "1" && v != "2") throw std::invalid_argument("STRIX_GLM_PF_HC_HOIST must be 0, 1 or 2");
+        return static_cast<unsigned>(v[0] - '0');
+    }();
+    return h;
+}
+
+void hc_expand_norm_rows_h(unsigned hoist, const float* X, const float* mix, const float* y, float* Xo, float* rr, unsigned* flag,
+                           unsigned rows, hipStream_t s) {
+    if (rows == 0) return;
+    launch_expand_norm<false>(hoist, X, mix, y, nullptr, Xo, rr, flag, rows, s);
+    ok(hipGetLastError(), "glm pf hc_expand_norm_rows");
+}
+
+void hc_sum_expand_norm_rows_h(unsigned hoist, const float* X, const float* mix, const float* y0, const float* y1, float* Xo, float* rr,
+                               unsigned* flag, unsigned rows, hipStream_t s) {
+    if (rows == 0) return;
+    launch_expand_norm<true>(hoist, X, mix, y0, y1, Xo, rr, flag, rows, s);
+    ok(hipGetLastError(), "glm pf hc_sum_expand_norm_rows");
+}
+
 void hc_expand_norm_rows(const float* X, const float* mix, const float* y, float* Xo, float* rr, unsigned* flag, unsigned rows,
                          hipStream_t s) {
-    if (rows == 0) return;
-    hc_expand_norm_rows_kernel<<<rows, 256, 0, s>>>(X, mix, y, Xo, rr, flag);
-    ok(hipGetLastError(), "glm pf hc_expand_norm_rows");
+    hc_expand_norm_rows_h(hc_expand_hoist(), X, mix, y, Xo, rr, flag, rows, s);
+}
+
+void hc_sum_expand_norm_rows(const float* X, const float* mix, const float* y0, const float* y1, float* Xo, float* rr, unsigned* flag,
+                             unsigned rows, hipStream_t s) {
+    hc_sum_expand_norm_rows_h(hc_expand_hoist(), X, mix, y0, y1, Xo, rr, flag, rows, s);
+}
+
+bool hc_sum_expand_enabled() {
+    static const bool on = [] {
+        const char* e = std::getenv("STRIX_GLM_PF_SUMEXP");
+        if (e == nullptr || *e == '\0') return true;  // default on: exact (same sum, same expand); 0 restores sum2 + expand
+        const std::string v(e);
+        if (v != "0" && v != "1") throw std::invalid_argument("STRIX_GLM_PF_SUMEXP must be 0 or 1");
+        return v == "1";
+    }();
+    return on && hc_expand_norm_enabled() && !hc_expand_norm_split();
 }
 
 void hc_pre_rows_normed(const float* X, const float* fn, const float* base, const float* scale, const float* rr, float* z, float* mix,

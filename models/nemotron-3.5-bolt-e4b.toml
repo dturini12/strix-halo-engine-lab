@@ -1,0 +1,65 @@
+# Export-only Nemotron 3.5 Bolt E4B contract (gemma4 architecture); does not configure execution.
+adapter = "gemma4-e4b-v1"
+name = "nemotron-3.5-bolt-e4b"
+schema = "strix-model/v1"
+
+[attention]
+bias = false
+bidirectional = "null"
+chunk = 64
+dropout = 0.0
+global_partial_rotary_factor = 0.25
+global_rope_dimension = 512
+global_rope_theta = 1000000.0
+global_rope_type = "proportional"
+group = 4
+head_dims = [256, 256, 256, 256, 256, 512, 256, 256, 256, 256, 256, 512, 256, 256, 256, 256, 256, 512, 256, 256, 256, 256, 256, 512, 256, 256, 256, 256, 256, 512, 256, 256, 256, 256, 256, 512, 256, 256, 256, 256, 256, 512]
+k_eq_v = false
+kind = "sliding+global"
+kv_dtype = "F32"
+kv_producers = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 22, 22, 22, 22, 22, 23, 22, 22, 22, 22, 22, 23, 22, 22, 22, 22, 22, 23]
+layer_types = ["sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "full_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "full_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "full_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "full_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "full_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "full_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "full_attention"]
+partial_rotary_factor = 1.0
+qk_norm = true
+rope_dimension = 256
+rope_theta = 10000.0
+rope_type = "default"
+scale = 1.0
+shared_kv_layers = 18
+window = 512
+
+[contract]
+arithmetic = "g4-v1"
+logit_cap = 30.0
+norm_eps_f32 = 9.9999999747524271e-07
+text_norm_eps = 9.9999999999999995e-07
+
+[dense]
+activation = "gelu_pytorch_tanh"
+double_wide = false
+moe = false
+tie_word_embeddings = true
+
+[dims]
+global_head_dim = 512
+head_dim = 256
+hidden = 2560
+intermediate = 10240
+layers = 42
+max_context = 65536
+n_heads = 8
+n_kv_heads = 2
+ple = 256
+ple_vocab = 262144
+vocab = 262144
+
+[extras]
+embedding_scale = 50.5
+model_ple_scale = 0.019764235243201256
+ple_combine_scale = 0.70710676908493042
+ple_embedding_scale = 16.0
+tap_layers = [5, 11, 17, 23, 35]
+
+[source]
+gguf_architecture = "gemma4"
+text_model_type = "gemma4_text"

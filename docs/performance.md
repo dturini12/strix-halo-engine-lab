@@ -30,12 +30,12 @@ sections below; GLM on one RTX PRO 6000 is on the [GLM page](models/glm-5.3/READ
 | Qwen3.8-Flash-Next, exact prefill | One node, plain command, prefill without model load, automatic T16384 from 32K | 1K **1,337 tok/s** (0.77 s); 4K **1,695** (2.42 s); 16K **1,730** (9.47 s); 17,700 **1,665** (10.63 s); 32K **1,713** (19.13 s); 128K **1,617** (81.08 s); 262,143 **1,509** (173.74 s); **54–56 %** of the contract ceilings (3,139 / 3,089 / 3,078 / 2,907 / 2,687 tok/s at 4K / 17,700 / 32K / 128K / 262,143) | main `85353311b` | default route; one binary; 64K not re-measured |
 | Qwen3.8-Flash-Next, YaRN factor 2 | One node, 262,144-token prompt, serial route | prefill **175.18 s = 1,496 tok/s**; serial decode **21.74 tok/s** | GDN plain-launch fix | one run, Linux 7.4; 176.60 s on `17b9c57b8`, within run-to-run noise |
 | Qwen MTP decode | One node, 256 generated tokens, auto windows | 1K code **62.44 tok/s** (72 % of the 86.8 tok/s byte ceiling); 1K prose 51.56; 16K code / prose **50.69 / 50.31** | main `85353311b` | exact; this prose prompt differs from the 55.7 tok/s prose row |
-| Qwen 1M context (YaRN factor 4) | One node | serial 925 s TTFT / 1,198 tok/s prefill / 19.6 tok/s decode (Linux 7.3); MTP 1,133 s / 936 tok/s / **60.2 tok/s** (Linux 7.4, 102/120 accepted) | #288 `3b8b9ac0f` | MTP == serial gate; different kernels, so no serial-to-MTP ratio |
+| Qwen 1M context (YaRN factor 4) | One node | serial 958.8 s TTFT / 1,145 tok/s prefill / 19.9 tok/s decode (50.28 ms/step); MTP 1,133 s / 936 tok/s / **60.2 tok/s** (102/120 accepted); both Linux 7.4 | #288 `3b8b9ac0f` (MTP), main `ff12e7344` (serial) | MTP == serial gate; MTP decode 3.0x serial |
 | DeepSeek pair standalone prefill | Pair, 16K prompt, alternating runs | **14.27–14.59 s** | #201 | logits identical in every run |
 | DeepSeek standalone RTX | RTX PRO 6000, full card, DSpark, 2 chats × 64 tokens after a 96-token prompt | **105–108 tok/s** (plain 26.7) | #325 | exact; a different workload from the 82.3 / 87.7 / 94.4 tok/s same-load rows |
 | MiniMax M3.1 Flash, decode | Pair TP2, greedy 1K / 8K, cold | **43.30 / 45.06 ms/token** (23.10 / 22.19 tok/s) | public tree of PR #59 | ranks agree, reference IDs equal |
 | MiniMax M3.1 Flash, DSpark | Pair TP2, JSON / Python / prose | **59.96 / 36.93 / 27.05 tok/s** | PR #70 `fbd43423` | IDs equal greedy |
-| MiniMax M3.1 Flash, prefill | Pair TP2; 1K / 8K alternating arms in one process, 32K fresh process both orders | TTFT **2.49–2.52 / 13.85–14.29 (mean 14.04) / 63.48 s** | #334 `c225cdaa2` | state and final rows equal the references on both ranks |
+| MiniMax M3.1 Flash, prefill | Pair TP2, defaults, one fresh process per cell, 1,024 / 8,192 / 32,768 tokens | TTFT **2.67 / 13.75 / 61.92 s** (383 / 596 / 529 tok/s); earlier 1K / 8K alternating arms in one process: 2.49–2.52 / 13.85–14.29 s (#334) | main `e778ef3c6` | results agree on both ranks; 32K result equal to the #376 rows; about ±3 % run-to-run |
 | MiniMax M3.1 Flash, served | Pair TP2, 8 distinct ~190-token prompts, 256 tokens, C1 / C2 / C4 / C8 | **22.0 / 32.2 / 44.5 / 55.7 tok/s** aggregate (repeat run 22.1 / 32.5 / 45.1 / 56.1) | main `e6ce78571` | every request's IDs equal the request alone |
 | GLM-5.3 Flash, decode | Pair TP2, R1b, `--mtp 0`; R8 batch; two runs | **39.00–39.03 ms/token** (25.6 tok/s, 57 % of the 44.7 tok/s ceiling); R8 **112.14–112.31 ms/step** (71.3 tok/s aggregate, calculated) | #332 `ec76191f2` | tokens and R8 equal the reference on both ranks |
 | GLM-5.3 Flash, exact prefill | Pair TP2, 1K / 8K / 32K, 8192-row chunks | TTFT **2.83 / 15.15 / 61.96 s** | #300 `32ec66bd3` | logits bitwise; MoE remainder tiles 32K −1.2 % over both run orders |
@@ -252,14 +252,14 @@ overrides). TTFT runs from process launch to the first token and includes model 
 The 262K prefill cell and the 262K serial decode cell are from the build with the GDN plain-launch fix (262,144-token
 prompt, prefill time without model load, `--profile default`, one run on Linux 7.4: 175.18 s; 176.60 s on `17b9c57b8`,
 within run-to-run noise); the 262K MTP decode cell is from build `7b2453fe`; the
-row's other cells are from the build above. The 1M row's serial cells are from public main `fdc39faba` on Linux 7.3; its
-MTP cells and exact gate are from #288 on Linux 7.4, so the row gives no serial-to-MTP ratio.
+row's other cells are from the build above. The 1M row's serial cells are from public main `ff12e7344` (1,048,320-token prompt, setup 43.1 s + prefill 915.7 s);
+its MTP cells and exact gate are from #288. Both sets ran on Linux 7.4.
 
 | Context (YaRN factor) | Exact gate (MTP == serial == pool off) | TTFT serial / MTP | Prefill, serial | Decode serial / MTP | MTP acceptance |
 |---|---|---|---|---|---|
 | 262,400 (2) | Full scope | 219 s / 224 s | **1,496 tok/s** `--profile default` (GDN plain-launch fix) | 21.74 (GDN plain-launch fix) / **59.5 tok/s** (`7b2453fe`) | 79 % (98/124) |
 | 524,288 (2) | Target scope | 470 s / 508 s | 1,215 tok/s | 19.7 / **60.6 tok/s** (3.1x) | 85 % |
-| 1,048,576 (4) | Full scope (MTP against serial with the HC output and index projection WMMA paths off) | 925 s (Linux 7.3) / 1,133 s (Linux 7.4) | 1,198 tok/s (Linux 7.3); MTP route 936 tok/s (Linux 7.4) | 19.6 (Linux 7.3) / **60.2 tok/s** (Linux 7.4) | 85 % (102/120) |
+| 1,048,576 (4) | Full scope (MTP against serial with the HC output and index projection WMMA paths off) | 958.8 s / 1,133 s | 1,145 tok/s; MTP route 936 tok/s | 19.9 / **60.2 tok/s** | 85 % (102/120) |
 
 These are exactness checks against serial YaRN, not native rotary; they do not establish general model
 fidelity at these lengths. See the [Qwen long-context section](models/qwen3.8/README.md#qwen-long-context).

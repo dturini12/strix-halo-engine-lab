@@ -1,0 +1,36 @@
+schema = "strix-model/v1"
+name = "minimax-m3.1-flash"
+
+# Descriptive template for the explicit MiniMax adapter; no runner selection.
+[graph]
+template = "minimax-m3.1-flash"
+custom_subgraphs = ["msa-indexer", "dense-prefix", "sparse-moe"]
+state_effects = ["append-kv-index", "fixed-rank-order-exchange"]
+
+[dims]
+hidden = 6144
+q = 8192
+kv = 512
+index_q = 512
+head_dim = 128
+n_heads = 64
+n_kv_heads = 4
+index_heads = 4
+layers = 60
+intermediate = 12288
+vocab = 200064
+vocab_rank_pad = 100096
+
+[attention]
+kind = "msa"
+
+[moe]
+first_layer = 3
+experts = 128
+top_k = 4
+intermediate = 3072
+
+[math]
+eps = 1e-6
+alpha = 1.702
+limit = 7.0

@@ -303,7 +303,7 @@ restores every reference form, and `--profile` is a load-time option that a work
 
 The prefill service (`strix-cuda-ds41-prefill-service`) does not take `--profile` yet. Its default already runs the
 fast dense / fast MoE arm (`--exact` for the reference bits), so a `default` profile there would change today's service
-behaviour. Its rows (batch-long, FP16 dense) are in the resolver's table (`strix/ds41_rtx_profile.hpp`) for the
+behaviour. Its rows (batch-long, FP16 dense) are in the resolver's table (`strix/profiles/ds41_rtx.hpp`) for the
 service to use once that decision is made.
 
 ## Optimizations (default ON) and off switches

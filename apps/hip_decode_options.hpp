@@ -5,7 +5,7 @@
 #include <iostream>
 #include "state_cache_stats.hpp"
 #include "qwen_cache_admission.hpp"
-#include "strix/qwen_profile.hpp"
+#include "strix/profiles/qwen.hpp"
 
 #include "qwen_prefill_options.hpp"
 #include "strix/decode_execution_options.hpp"

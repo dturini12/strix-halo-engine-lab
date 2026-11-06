@@ -28,7 +28,7 @@
 // max(--host-commit-floor-gib, 20) GiB free and, with --host-promote-max-gib G, the promoted layers stay under G GiB;
 // below the floor at a request start the least recently used promoted layers go back to the file. Off:
 // --no-host-promote, STRIX_DS41_HOST_PROMOTE=0, --baseline / STRIX_DS41_RTX_BASELINE=1 (the service's default-ON
-// levers off; strix/ds41_rtx_profile.hpp, app prefill-service; the last of a lever's options and --baseline decides).
+// levers off; strix/profiles/ds41_rtx.hpp, app prefill-service; the last of a lever's options and --baseline decides).
 // Streamer transport only (not with --no-expert-residency, --pass-rows).
 // --layers L: layers [0, L) only (tests: no head, no cone; the next token is not the model's).
 //
@@ -95,7 +95,7 @@
 #endif
 
 #include "strix/ds41_memory_budget.hpp"
-#include "strix/ds41_rtx_profile.hpp"
+#include "strix/profiles/ds41_rtx.hpp"
 #include "strix/ds41_state_transfer.hpp"
 #ifdef _WIN32
 #include <bcrypt.h>

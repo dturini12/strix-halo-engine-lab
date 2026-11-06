@@ -1,5 +1,7 @@
 #pragma once
 
+#include "strix/engine_profile.hpp"
+
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -25,9 +27,11 @@
 // value whose code is not in this build, and a bench whose only fallback is itself unqualified.
 namespace strix::gemma4::profile {
 
-enum class Name : unsigned { standard = 0, fast = 1, quality = 2 }; // `standard` prints as "default"
+using strix::profile::Name;
+using strix::profile::name;
 enum class App : unsigned { engine = 1, decode_bench = 2, prefill_bench = 4 };
-enum class Kind { exact, bit_changing, pack };
+using strix::profile::Kind;
+using strix::profile::kind_name;
 
 struct Lever {
     std::string_view name{};               // receipt key
@@ -51,7 +55,6 @@ struct Lever {
 
 enum class Status { set, explicit_env, explicit_cli, builtin, pending, unqualified, absent, off };
 [[nodiscard]] const char* status_name(Status status);
-[[nodiscard]] const char* kind_name(Kind kind);
 
 struct Entry {
     const Lever* lever = nullptr;
@@ -78,11 +81,10 @@ struct Resolution {
 };
 
 [[nodiscard]] Name parse(std::string_view value); // default|fast|quality, else throws
-[[nodiscard]] const char* name(Name profile);
 [[nodiscard]] const char* app_name(App app);
 
-using Lookup = std::function<const char*(const char*)>;
-using Pairs = std::vector<std::pair<std::string, std::string>>;
+using strix::profile::Lookup;
+using strix::profile::Pairs;
 struct Inputs {
     Pairs cli;                  // levers set on the command line: {lever name, value}
     Pairs assets;               // discovered assets for asset levers: {lever name, path}
@@ -94,6 +96,12 @@ struct Inputs {
 // Exports the switches of entries with status `set` or `unqualified` to the process environment
 // (never asset or off-switch levers). Call before anything reads (and caches) those switches.
 void apply(const Resolution& resolution);
+
+// Partial profile receipt: preserves the caller's numerical identity verbatim; unknown fields stay empty.
+// No execution owner is resolved here, so no DEFAULT/FAST contract or device implementation is inferred.
+// contracts/g4_identity.hpp declares base g4-v1 (separate mul/add, gradual underflow);
+// callers may bind it explicitly when it is the actual admitted contract. This adapter executes no reference.
+[[nodiscard]] strix::profile::ExecutionReceipt host_receipt(strix::profile::NumericalIdentity known = {});
 
 // Prompt prefill route for STRIX_G4_PREFILL_IDENTITY (exact|v1|v2|a8|fast) and the pack: "fast" (the fast
 // profile's value) runs g4-wmma-pf-v1 only on a GGUF pack whose general.file_type is 15 (MOSTLY_Q4_K_M), the

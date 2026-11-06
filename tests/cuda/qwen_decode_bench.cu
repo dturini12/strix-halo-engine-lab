@@ -58,8 +58,9 @@ int main(int argc, char** argv) {
         ms.push_back(std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
         seq.push_back(r.argmax[0]);
     }
+    const auto med = [](const std::vector<double>& v) { const std::size_t k = v.size(); return k % 2 ? v[k / 2] : 0.5 * (v[k / 2 - 1] + v[k / 2]); };
     std::sort(ms.begin(), ms.end());
-    std::printf("serial T=1: median %.2f ms (%.1f tok/s), min %.2f\n", ms[ms.size() / 2], 1000.0 / ms[ms.size() / 2], ms[0]);
+    std::printf("serial T=1: median %.2f ms (%.1f tok/s), min %.2f\n", med(ms), 1000.0 / med(ms), ms[0]);
     for (std::uint32_t t = 2; t <= 8; ++t) {
         std::vector<std::uint32_t> pre(seq.begin(), seq.begin() + static_cast<std::ptrdiff_t>(n));
         p.run(pre, n - 1, drop);
@@ -70,7 +71,7 @@ int main(int argc, char** argv) {
             w.push_back(std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
         }
         std::sort(w.begin(), w.end());
-        std::printf("window T=%u: median %.2f ms\n", t, w[w.size() / 2]);
+        std::printf("window T=%u: median %.2f ms\n", t, med(w));
     }
     if (!c.mtp_sidecar_gguf.empty()) {
         const float min_p = std::getenv("STRIX_QWEN_MIN_P") ? static_cast<float>(std::atof(std::getenv("STRIX_QWEN_MIN_P"))) : 0.7F;

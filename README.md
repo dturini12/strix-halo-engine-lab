@@ -63,7 +63,7 @@ conditions, repetition counts, exactness evidence and off switches.
 | Qwen3.8-Flash-Next | 1 node | Exact prefill TTFT, 4K / 32K, plain CLI default route | **2.397 / 19.05 s** | 2.548 / 20.57 s with every default lever off → −5.9 / −7.4 % (one binary, alternating runs; 32K T16384 vs T8192) | main, one binary |
 | Qwen3.8-Flash-Next | 1 node | Exact prefill, plain command, 1K / 4K / 32K / 128K / 262,143 tokens | **1,337 / 1,695 / 1,713 / 1,617 / 1,509 tok/s** (32K 19.13 s; 54–56 % of the contract ceilings) | 1,363 / 1,395 / 1,238 / 1,089 tok/s at 4K / 32K / 128K / 262,143 on `8b99cf58` | main `85353311b`, one binary |
 | Qwen3.8-Flash-Next | 1 node | 262,144-token prefill (YaRN factor 2), serial route | **1,496 tok/s** `default` (one run, Linux 7.4) | 1,484 tok/s on `17b9c57b8` (within run-to-run noise) | GDN plain-launch fix |
-| Qwen3.8-Flash-Next | 1 node | MTP decode at 262K / 524K / 1M context (YaRN) | **59.5 / 60.6 / 60.2 tok/s** | serial YaRN decode 21.74 / 19.7 / 19.6 tok/s; at 1M serial ran on Linux 7.3 and MTP on Linux 7.4, so no ratio | `7b2453fe` (262K MTP), GDN plain-launch fix (262K serial), `a199c8e0` (524K), #288 `3b8b9ac0f` (1M) |
+| Qwen3.8-Flash-Next | 1 node | MTP decode at 262K / 524K / 1M context (YaRN) | **59.5 / 60.6 / 60.2 tok/s** | serial YaRN decode 21.74 / 19.7 / 19.9 tok/s; at 1M both on Linux 7.4, MTP 3.0x serial (serial 1M: 958.8 s TTFT, 1,145 tok/s prefill) | `7b2453fe` (262K MTP), GDN plain-launch fix (262K serial), `a199c8e0` (524K), #288 `3b8b9ac0f` (1M MTP), main `ff12e7344` (1M serial) |
 | Qwen3.8-Flash-Next | 2 nodes, one replica each | HTTP coding chats, C1 / C8, wall throughput | **68.2 / 158.1 tok/s** | +3.6 % wall at C8 and −6.9 % TTFT at C4 vs the release build, same session | `0117a140` |
 | Qwen3.8-Flash-Next | 1 node | HTTP single runner, 127.6K-token conversation, cold decode | **52.0 tok/s** | 39.5 tok/s before the QSA MTP pool; restored turns +31 % / +37 % | main |
 | Qwen3.8-Flash-Next + RTX PRO | 1 node + RTX PRO | Prefill offload, TTFT at 32K (8K) | **8.99 s** (2.94 s) | 44.02 s (10.46 s) on the same server without the RTX, 4.9× at 32K | `70b93af3` |
@@ -75,7 +75,7 @@ conditions, repetition counts, exactness evidence and off switches.
 | DeepSeek V4.1 Flash, standalone | RTX PRO 6000 (Windows) | On-GPU DSpark decode, code / English / Spanish, same load | **82.3 / 87.7 / 94.4 tok/s** (best across loads 94–95 / 97 / 100–101) | keep-64 draft pruning +16 % on code; decode/cache kernel set all-hit 12.62 → 10.50 ms/token | measured line of PR #52 |
 | **MiniMax M3.1 Flash** | 2 nodes | Greedy decode, 1K / 8K, 256 tokens | **43.30 / 45.06 ms/token** (23.10 / 22.19 tok/s), cold | 44.57 / 46.10 ms/token on `8cc30ac0`; exchange-boundary defaults: N1 48.22 → 43.92 ms/step; later MoE grid + o_proj warm levers −1.2 % and −1.3 % at 8K | public tree of PR #59 |
 | MiniMax M3.1 Flash | 2 nodes | DSpark decode, JSON / Python / prose | **59.96 / 36.93 / 27.05 tok/s** | 54.4 / 34.1 / 24.1 tok/s on `8cc30ac0`; serving auto admission: JSON −34.6 %, code −17.5 % wall time, prose stays plain | PR #70 `fbd43423` |
-| MiniMax M3.1 Flash | 2 nodes | Combined prefill TTFT, 8K / 32K | **14.04 s** (583 tok/s) / **63.48 s** (516 tok/s) | 17.731 / 91.508 s on `e0bad3d1` → −21 / −31 % (gather + q/k/v, shipped prefill set, tail stream, prefill pipe pair) | #334 `c225cdaa2`; 8K alternating arms in one process (13.85–14.29 s), 32K fresh process |
+| MiniMax M3.1 Flash | 2 nodes | Combined prefill TTFT, 1K / 8K / 32K, defaults | **2.67 s** (1,024 tokens, 383 tok/s) / **13.75 s** (8,192 tokens, 596 tok/s) / **61.92 s** (32,768 tokens, 529 tok/s) | 17.731 / 91.508 s on `e0bad3d1` → −22 / −32 % at 8K / 32K (gather + q/k/v, shipped prefill set, tail stream, prefill pipe pair) | main `e778ef3c6`; one fresh process per cell, results agree on both ranks |
 | **GLM-5.3 Flash** | 2 nodes | MTP self-speculation decode, chat / code / JSON | **37.1 / 44.5 / 40.0 tok/s** | 1.50× / 1.79× / 1.62× plain R1b decode (40.3–40.6 ms/token); R1b identity −11.5 % vs R1 | default identity |
 | GLM-5.3 Flash | 2 nodes | Exact chunked prefill TTFT, 1K / 8K / 32K, 8192-row chunks | **2.83 / 15.15 / 61.96 s** (541 / 529 tok/s at 8K / 32K), all defaults | 3.18 / 17.77 / 76.59 s → 2.83 / 15.15 / 61.96 s (−11.0 / −14.7 / −19.1 %), logits bitwise; last step MoE remainder tiles: 8K −1.3 % (alternating pairs), 32K −1.2 % (both run orders) | #300 `32ec66bd3` |
 | GLM-5.3 Flash | 2 nodes | Served (`strix-glm5-serve`), concurrent streams C1 / C2 / C4 / C6 / C8, steady-state decode; 8 built-in short chat prompts in the GLM chat template, 22–59 prompt tokens (mean ~33), up to 128 greedy tokens each, barrier start, prefix cache off | **C1 40.0 / C2 53.0 (G2 off 37.8) / C4 59.9 (53.6) / C6 62.5 (62.4) / C8 69.5 (69.4) tok/s aggregate** | every stream == the same request alone (exact); C1 through MTP (25.30 tok/s plain); batched MTP verify (G2) +40 / +12 % at C2 / C4, hands over to batched plain steps from C6 | current |
@@ -217,6 +217,17 @@ the same bits for that identity. Build with `-DSTRIX_FAMILY_H3=ON` (nothing is b
 its own flag, and without them the run is the dense reference.
 [Install, model files, one command per clip and rollback](docs/models/minimax-h3/README.md#h3-install) ·
 [stage breakdown](docs/models/minimax-h3/README.md#h3-result).
+
+## Adding a model
+
+Registering descriptive metadata for an already supported compiled contract requires one description file
+(`models/<name>.toml`) and one registry row (a `[models.<id>]` table in `models/registry.toml`). These files do not add
+inference support for a new size or checkpoint contract. A changed contract still requires family adapter/engine work
+and qualification, and a new architecture needs its own family module (kernels, layer walk, adapter) that plugs into
+the common profile, receipt and switch-table code. The registry is not read at run time;
+`strix-model-registry-tests` checks names, file existence and coverage only. Per-family scope, commands and the device
+checks before calling a model supported: [docs/engine/adding-a-model.md](docs/engine/adding-a-model.md). The switch table generated from the
+engines' defaults tables: [docs/engine/optimization-table.md](docs/engine/optimization-table.md).
 
 ## Documentation
 

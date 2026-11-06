@@ -1,5 +1,7 @@
 #pragma once
 
+#include "strix/engine_profile.hpp"
+
 #include <array>
 #include <functional>
 #include <optional>
@@ -28,10 +30,15 @@
 // and stamps the receipt "unqualified: <rows>".
 namespace strix::ds41::rtx::profile {
 
-enum class Name : unsigned { standard = 0, fast = 1, quality = 2 };  // `standard` prints as "default"
+using strix::profile::Name;
+using strix::profile::name;
+using strix::profile::parse;
 enum class App : unsigned { replica = 1, prefill_service = 2 };
-enum class Kind { exact, bit_changing };
+using strix::profile::Kind;
+using strix::profile::kind_name;
 
+// Typed adapter: RTX has multiple options per row, app masks and ordered baseline
+// statuses. These differ from the common single-option/export schema.
 struct Option {
     std::string_view flag;   // e.g. "--no-wb-stream"
     std::string_view value;  // what the flag sets the lever to; "*" = the option's argument
@@ -39,7 +46,7 @@ struct Option {
 
 struct Lever {
     std::string_view name;                  // receipt key
-    std::string_view env;                   // the lever's own environment switch (empty: none)
+    std::string_view env{};                 // the lever's own environment switch (empty: none)
     std::array<Option, 6> options{};        // CLI options that set the lever explicitly (unused entries empty)
     std::array<std::string_view, 3> value;  // per profile (default, fast, quality); empty: the profile leaves it alone
     std::string_view builtin;               // this build with no profile, option or variable
@@ -54,7 +61,6 @@ struct Lever {
 
 enum class Status { profile, explicit_cli, explicit_env, baseline_cli, baseline_env, pending, unqualified };
 [[nodiscard]] const char* status_name(Status status);
-[[nodiscard]] const char* kind_name(Kind kind);
 
 struct Entry {
     const Lever* lever = nullptr;
@@ -75,13 +81,14 @@ struct Resolution {
     // {"profile","app","qualification","allow_pending","levers":{name:{value,status,switch,kind,source[,wanted][,effective]}},
     //  "pending":[...],"unqualified":[...]}; `effective` (optional) gives the app's resolved value of a lever ("" = omit)
     [[nodiscard]] std::string json(const std::function<std::string(std::string_view)>& effective = {}) const;
+    // Host profile provenance only. The execution owner supplies the actual numerical
+    // contract/assets after admission; unknown fields stay empty. Never auto-emitted.
+    [[nodiscard]] strix::profile::ExecutionReceipt host_receipt(strix::profile::NumericalIdentity identity = {}) const;
 };
 
-[[nodiscard]] Name parse(std::string_view value);  // default|fast|quality, else throws std::invalid_argument
-[[nodiscard]] const char* name(Name profile);
 [[nodiscard]] const char* app_name(App app);
 
-using Lookup = std::function<const char*(const char*)>;
+using strix::profile::Lookup;
 struct Inputs {
     std::vector<std::string> args;  // the launch options (argv[2..])
     Lookup env;                     // environment lookup; empty: the process environment

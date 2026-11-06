@@ -120,6 +120,14 @@ struct EffectiveConfig {
     std::map<std::string, std::uint64_t> admission;
     RotaryIdentity rotary_identity;
 };
+// Inspection knows resolved arithmetic, not an executed workload or its assets.
+// Native qualification callers may attach their actual compiled lineage.
+inline ::strix::profile::ExecutionReceipt host_receipt(const EffectiveConfig& config,
+        std::string_view prefill_lineage = {}) {
+    return qwen::profile::host_receipt(numerical_profile_pair(config.options),
+        config.prefill_option_mask, config.gsq_owner, prefill_lineage);
+}
+
 inline void require_bitcalc_session_route(const Options& options, bool enabled) {
     if (enabled) {
         const auto refuse = [](bool active, const char* protocol) {

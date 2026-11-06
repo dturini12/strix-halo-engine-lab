@@ -1,0 +1,4 @@
+KernelName,DurationNs
+weight_up,40000000
+weight_down,40000000
+gemm,8000000

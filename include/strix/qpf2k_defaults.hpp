@@ -1,5 +1,6 @@
 #pragma once
 
+#include "strix/engine_profile.hpp"
 #include "strix/gsq_a8_groups.hpp"
 #include "strix/model_manifest.hpp"
 
@@ -17,10 +18,12 @@ enum class Item : unsigned {
     norm_group, index_rows, cohort_lean, rows_lean, dispatch_fuse, score_rows, ple_batch, shared_pre, moe_mc, moe_hdr,
     moe_xor64, hc_lowband,
 };
-struct Default {
+// The common policy row carries values; Qwen retains per-owner admission and
+// injection provenance. name remains the historical environment/receipt key.
+struct Default : ::strix::profile::DefaultItem {
     Item item;
-    const char* name;
-    const char* value;
+    constexpr Default(Item key, const char* environment_name, const char* default_value)
+        : DefaultItem{environment_name, environment_name, default_value, "0", environment_name}, item(key) {}
 };
 inline constexpr std::array defaults{
     Default{Item::sched, "STRIX_QPF2K_SCHED", "14"},
@@ -136,7 +139,9 @@ unsigned initialize(Get get, Put put, unsigned allowed = ~0U) {
         if (!(allowed & bit(entry.item))) continue;
         if (entry.item == Item::qsa_mask && !(injected & bit(Item::qsa))) continue;
         if (entry.item == Item::hc_mask && !(injected & bit(Item::hc))) continue;
-        if (!get(entry.name) && put(entry.name, entry.value)) injected |= bit(entry.item);
+        const auto value = ::strix::profile::resolve_default(entry, false, [&](const char* key) { return get(key); });
+        if (value.source == ::strix::profile::DefaultSource::on && put(entry.name, value.value.c_str()))
+            injected |= bit(entry.item);
     }
     const unsigned moe = ((injected & bit(Item::moe_da16)) ? 1U : 0U) |
         ((injected & bit(Item::moe_route)) ? 2U : 0U);
@@ -184,7 +189,7 @@ unsigned carried_pre_injected(Get get, unsigned allowed) {
     for (const auto& entry : defaults) {
         if (!(value & bit(entry.item)) || !(allowed & bit(entry.item))) continue;
         const char* current = get(entry.name);
-        if (current && std::string_view(current) == entry.value) carried |= bit(entry.item);
+        if (current && std::string_view(current) == entry.on) carried |= bit(entry.item);
     }
     if ((value & pre_injected_marker_moe) && get("STRIX_QPF2K_MOE_DEFAULTED")) carried |= pre_injected_marker_moe;
     return carried;

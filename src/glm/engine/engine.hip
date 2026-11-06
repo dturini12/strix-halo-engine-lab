@@ -16,6 +16,9 @@
 #include "glm/engine/glm_r1b.hpp"
 #include "glm/kernels/glm_dsa.hpp"
 #include "glm/kernels/glm_tier_a.hpp"
+#include "glm/load/glm_model_description.hpp"
+#include "glm/moe/glm_moe.hpp"
+#include "glm/prefill/glm_pf_moe.hpp"
 #include "glm/prefill/glm_prefill.hpp"
 #include "glm/spec/glm_spec_dev.hpp"
 #include "glm/xfer/glm_post_fast.hpp"
@@ -37,6 +40,19 @@
 #include <string>
 
 namespace strix::glm::engine {
+
+// The explicit host adapter checks the description against the common model
+// dimensions. Also bind the duplicated TP2 MoE and exchange constants here,
+// without changing their kernel headers or their compiled launch schedules.
+static_assert(moe::kHidden == kHidden && moe::kExperts == kExperts && moe::kTopE == kTopE && moe::kInter * 2 == kExpertI);
+static_assert(pf::kMoeHidden == kHidden && pf::kMoeExperts == kExperts && pf::kMoeTop == kTopE && pf::kMoeInter * 2 == kExpertI);
+static_assert(xfer::GlmSchedule::kLayers == kLayers && xfer::kRowF32 == std::size_t{kHidden} * sizeof(float));
+static_assert(kEps == static_cast<float>(model::contract::rms_eps) && kHcEps == static_cast<float>(model::contract::hc_eps));
+static_assert(kL2Eps == static_cast<float>(model::contract::l2_eps) && kLnEps == static_cast<float>(model::contract::ln_eps));
+static_assert(kGateLow == static_cast<float>(model::contract::gate_lower_bound) && kClamp == static_cast<float>(model::contract::clamp));
+static_assert(kRouteScale == static_cast<float>(model::contract::route_scale) && kRouteDenEps == static_cast<float>(model::contract::route_den_eps));
+static_assert(kInvSqrt128 == static_cast<float>(model::contract::inv_sqrt128) && kInvSqrt32 == static_cast<float>(model::contract::inv_sqrt32));
+static_assert(kMlaScale == static_cast<float>(model::contract::mla_scale));
 
 namespace {
 
@@ -318,6 +334,7 @@ public:
     }
     void start_reduce_region(float* p, unsigned rows, unsigned offset, int half, hipStream_t s) {
         if (pending_part_ != nullptr) throw std::logic_error("prefill reduction already in flight");
+        if (held_) throw std::logic_error("prefill pair still held (release_pair before the next start)");
         dist::Tag tag;
         tag.kind = static_cast<std::uint32_t>(dist::TagKind::half_sum);
         tag.request = seq_++;
@@ -374,7 +391,36 @@ public:
         hip_ok(hipGetLastError(), "sum2 prefill pipeline");
         if (pending_half_ >= 0) hip_ok(hipEventRecord(remote_last_use_[pending_half_], s), "prefill remote last use");
     }
+    // STRIX_GLM_PF_SUMEXP: finish_reduce without the sum. *p0 / *p1 are the two partials in rank order, read by one
+    // consumer on s; release_pair (after that consumer, before the next start) fences RX / remote-region reuse exactly as
+    // finish_reduce does after its sum2. The partial itself is left unsummed.
+    void finish_reduce_pair(hipStream_t s, const float** p0, const float** p1) {
+        if (pending_part_ == nullptr) throw std::logic_error("prefill reduction not in flight");
+        if (held_) throw std::logic_error("prefill pair already held");
+        const float* p = pending_part_;
+        pending_part_ = nullptr;
+        const float* r = nullptr;
+        held_staged_ = staged_;
+        if (staged_) {
+            staged_ = false;
+            r = static_cast<const float*>(comm_.finish_staged(s));
+        } else {
+            comm_.finish(s, pending_remote_);
+            r = pending_remote_;
+        }
+        held_ = true;
+        held_half_ = pending_half_;
+        *p0 = rank_ == 0 ? p : r;
+        *p1 = rank_ == 0 ? r : p;
+    }
+    void release_pair(hipStream_t s) {
+        if (!held_) throw std::logic_error("prefill pair not held");
+        held_ = false;
+        if (held_staged_) comm_.release_staged(s);
+        else if (held_half_ >= 0) hip_ok(hipEventRecord(remote_last_use_[held_half_], s), "prefill remote last use");
+    }
     void complete(hipStream_t s) override {
+        if (held_) release_pair(s);
         if (pending_part_ != nullptr) finish_reduce(s);
     }
     void argmax(float* value, std::uint32_t* id, unsigned rows, hipStream_t s) override {
@@ -449,6 +495,8 @@ private:
     bool source_pending_[2] = {};
     bool staged_ = false;  // the in-flight reduction uses the staging views (STRIX_GLM_PF_STAGED)
     int staged_vote_ = -1;  // -1 not yet agreed, 0 chunked copies, 1 staging views (both ranks)
+    bool held_ = false, held_staged_ = false;  // finish_reduce_pair handed out RX / the remote region (until release_pair)
+    int held_half_ = -1;
 };
 
 // ---------------------------------------------------------------- layer weights
@@ -889,6 +937,7 @@ struct Engine::Impl {
     }
 
     LoadReport load_checked(const std::function<unsigned(const mem::LoadAdmission&)>& select_max_rows) {
+        model::validate_model_directory(opt.model_dir);
         load_identity = identity;
         const auto t0 = Clock::now();
         start_monitor();
@@ -1334,36 +1383,46 @@ struct Engine::Impl {
             mark(segHc);
             std::swap(h.x, h.out);
         };
+        // STRIX_GLM_PF_SUMEXP (async half regions + the fused expand only): the seam hands both partials to the expand,
+        // which sums them on load, and frees RX / the remote region before the next start (one staging RX buffer).
+        // Otherwise the exchange sums into part and the next start precedes the expand, as before.
+        CommExchange* sum_xch = async_xch != nullptr && glm::pf::hc_sum_expand_enabled() ? async_xch : nullptr;
+        auto seam = [&](Half& done, Half* next) {
+            if (sum_xch == nullptr) {
+                finish();
+                if (next) start(*next);
+                expand(done);
+                return;
+            }
+            const float *p0 = nullptr, *p1 = nullptr;
+            sum_xch->finish_reduce_pair(stream, &p0, &p1);
+            mark(segXch);
+            const std::size_t q = done.offset;
+            // p0 / p1 already point at this half's first row (its part region and its RX / remote region).
+            glm::pf::hc_sum_expand_norm_rows(done.x, mix + q * kHcMix, p0, p1, done.out, hrr + q, flag, done.count, stream);
+            done.normed = true;
+            sum_xch->release_pair(stream);
+            mark(segHc);
+            std::swap(done.x, done.out);
+            if (next) start(*next);
+        };
         try {
             for (unsigned li = 0; li < n_layers; ++li) {
                 LayerW& w = layers[li];
                 cur_layer = li;
                 attention(a, w);
                 // B's previous FFN may overlap next-layer attention A. Retire before the next start.
-                if (li != 0 && b.count != 0) {
-                    finish();
-                    expand(b);
-                }
+                if (li != 0 && b.count != 0) seam(b, nullptr);
                 start(a);
                 if (b.count != 0) attention(b, w);  // A's recurrence / cache commits precede B on stream
-                finish();
-                if (b.count != 0) start(b);
-                expand(a);
+                seam(a, b.count != 0 ? &b : nullptr);
                 ffn(a, w);
-                if (b.count != 0) finish();
-                start(a);
-                if (b.count != 0) {
-                    expand(b);
-                    ffn(b, w);
-                }
-                finish();
-                if (b.count != 0) start(b);
-                expand(a);
+                if (b.count != 0) seam(b, &a);
+                else start(a);
+                if (b.count != 0) ffn(b, w);
+                seam(a, b.count != 0 ? &b : nullptr);
             }
-            if (n_layers != 0 && b.count != 0) {
-                finish();
-                expand(b);
-            }
+            if (n_layers != 0 && b.count != 0) seam(b, nullptr);
         } catch (...) {
             // Do not leave a producer / host transfer borrowing row buffers after a seam throws.
             try { xch->complete(stream); } catch (...) {}

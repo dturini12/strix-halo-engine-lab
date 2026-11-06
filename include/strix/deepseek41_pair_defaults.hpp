@@ -98,6 +98,13 @@ const std::string& profile_json();
 const strix::profile::Resolution& profile_resolution();
 // The code defaults adopted on 2026-10-25/26 that STRIX_DS41_BASELINE=1 switches off (variable, value).
 const std::vector<std::pair<std::string, std::string>>& baseline_off_items();
+// Empty ON means leave the app/kernel builtin untouched; OFF is baseline export.
+std::span<const strix::profile::DefaultItem> default_items();
+// Host provenance only, never a complete startup execution witness. The execution
+// owner supplies the admitted numerical contract (e.g. ds41-exact-v1 versus
+// ds41-expert-tp2-i1152-v1), assets and lineage; unresolved fields stay empty.
+strix::profile::ExecutionReceipt host_receipt(App app, const Resolved& resolved,
+                                             strix::profile::NumericalIdentity identity = {});
 Resolved resolve(App app, const std::vector<std::string>& args, const Getenv& env, const Probe& probe, const Build& build);
 // The printed form of --print-effective-config: "app", then every set/unset variable and argument, one per line.
 std::string describe(App app, const Resolved& r);
