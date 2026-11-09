@@ -88,6 +88,7 @@ int main() try {
     expect(ds::prefix_disk_quota_bytes(262144) == 262144ULL << 20U, "256 GiB tier: 256 GiB quota");
     expect(ds::prefix_disk_quota_bytes(0) == UINT64_MAX, "unlimited tier: no directory quota");
     expect(ds::prefix_disk_quota_bytes(UINT64_MAX >> 20U) == (UINT64_MAX >> 20U) << 20U, "largest accepted tier does not wrap");
+    expect(ds::prefix_disk_quota_bytes(UINT64_MAX) == UINT64_MAX, "a larger value never wraps to a zero quota");
 #if defined(__unix__)
     const auto root = std::filesystem::temp_directory_path() / ("ds41-host-lease-test-" + std::to_string(::getpid()));
     {

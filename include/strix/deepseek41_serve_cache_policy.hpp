@@ -107,7 +107,8 @@ inline bool prefix_memory_admitted(std::uint64_t available_mb, std::uint64_t res
 // An unlimited tier (0) gets no quota; the filesystem free-space floor still applies.
 inline std::uint64_t prefix_disk_quota_bytes(std::uint64_t disk_mb) {
     constexpr std::uint64_t floor_mb = 4096;
-    if (disk_mb == 0U) return std::numeric_limits<std::uint64_t>::max();
+    constexpr std::uint64_t max_mb = std::numeric_limits<std::uint64_t>::max() >> 20U;
+    if (disk_mb == 0U || disk_mb > max_mb) return std::numeric_limits<std::uint64_t>::max();   // (larger: no wrap)
     return (disk_mb > floor_mb ? disk_mb : floor_mb) << 20U;
 }
 

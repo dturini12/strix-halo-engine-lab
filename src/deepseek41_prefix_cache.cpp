@@ -1224,28 +1224,36 @@ bool PrefixCache::insert_disk(const AttentionState& s, std::uint64_t logits_fnv,
     const std::uint64_t need = snap_file + std::uint64_t{blocks - have} * block_file;
     // Make room in this tier before the reservation: the service-directory quota counts the files on disk, so a
     // full tier evicted only after a successful reservation was refused by its own quota forever (no write, no
-    // eviction).  The decision depends only on this tier's entries and `need`, which both ranks share, so ranks
-    // still evict alike whatever the resource admission below decides; the deletions are written out first so the
-    // quota no longer counts them.
+    // eviction).  The decision uses only this tier's accounting and `need`, the same inputs the eviction used when it
+    // ran after the admission, so the ranks evict alike whatever the resource admission below decides.  A refused
+    // insert may therefore have freed up to `need` of least recently used states, which the next accepted one would
+    // have freed anyway.  The deletions are written out first so the quota no longer counts them.
     if (options_.disk_budget_bytes != 0U) {
         if (need > options_.disk_budget_bytes) {
             ++stats_.disk_refused;
             return false;
         }
+        const std::uint64_t room = options_.disk_budget_bytes - need;   // need <= budget: no wrap
         DiskEntry* tip = have > 0U ? disk_.at(keys[have - 1U]).get() : nullptr;
         if (tip != nullptr) ++tip->children;
         const auto evicted = stats_.disk_evicted_snapshots;
-        while (stats_.disk_bytes + need > options_.disk_budget_bytes && stats_.disk_snapshots > 0U) evict_disk_one();
+        while (stats_.disk_bytes > room && stats_.disk_snapshots > 0U) evict_disk_one();
         if (tip != nullptr) --tip->children;
-        if (stats_.disk_bytes + need > options_.disk_budget_bytes) {
+        if (stats_.disk_bytes > room) {
             if (tip != nullptr) prune_disk(tip->key);
             ++stats_.disk_refused;
             return false;
         }
         if (stats_.disk_evicted_snapshots != evicted) writer_->flush();
     }
-    // Reserve before allocating/serializing payloads, and keep the active write charged.
-    const bool reserved = writer_->reserve(need);
+    // Reserve before allocating/serializing payloads, and keep the active write charged.  A write still in flight
+    // counts twice in the quota (its reservation and its partial file) and pending deletions still count, so a refusal
+    // is retried once after the writer drains.
+    bool reserved = writer_->reserve(need);
+    if (!reserved) {
+        writer_->flush();
+        reserved = writer_->reserve(need);
+    }
     std::error_code space_error;
     const auto space = fs::space(options_.dir, space_error);
     bool allowed = reserved && (options_.min_free_bytes == 0U ||
