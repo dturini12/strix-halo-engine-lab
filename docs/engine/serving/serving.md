@@ -355,8 +355,11 @@ window stream shared by all slots. The calibration replay runs once.
 - `tools` (function tools) are rendered into the system turn the way the model was trained; assistant
   tool calls in the history are rendered from `tool_calls` (string or object `arguments`).
 - Thinking: on by default (the template default). `chat_template_kwargs.enable_thinking: false`
-  (or top-level `enable_thinking: false`) disables it; `reasoning_effort` (`low`, `medium`, `high`,
-  `xhigh`) and `preserve_thinking` are passed to the template.
+  (or top-level `enable_thinking: false`) disables it. The DeepSeek V4.1 server (`strix-deepseek41-serve`) is the
+  exception: a request that sets neither `enable_thinking` nor Messages `thinking.type` runs in chat (non-thinking)
+  mode unless the server runs with `--default-thinking on`; the request's choice always wins (many agent clients
+  never set either field). `reasoning_effort` (`low`, `medium`, `high`, `xhigh`) and `preserve_thinking` are passed
+  to the template.
 - The reply is split into `reasoning_content` (the thinking block), `content` and `tool_calls`.
   Parameter values of a tool call are typed by the tool's JSON schema (strings stay strings, other
   types are parsed as JSON); `finish_reason` is `tool_calls` when the reply contains calls.

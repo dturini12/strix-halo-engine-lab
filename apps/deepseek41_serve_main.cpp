@@ -12,6 +12,7 @@
 //       [--engram-direct] [--http-bind 127.0.0.1] [--http-port 0] [--http-api-key-file F] [--http-max-queue 64]
 //       [--http-max-connections 64] [--http-responses on|off] [--http-capabilities on|off]
 //       [--http-stream-receipts on|off] [--http-sse-keepalive 10] [--model-id deepseek-v4.1-flash] [--default-max-tokens 1024]
+//       [--default-thinking off|on] (chat mode of requests that set neither enable_thinking nor thinking.type)
 //       [--connect-timeout 60] [--peer-timeout 60]
 //       [--prefill-path rows|device] [--prefill-rows 4096] [--prefill-min 0]
 //       [--prefix-cache-mb 512] [--prefix-block 256] [--prefix-reserve-mb 8192] [--import-parked 1]
@@ -178,6 +179,7 @@ struct Args : strix::deepseek41::ServeCachePolicy {
     std::uint32_t pool = 0;  // BatchForwardOptions::pool_positions (0: every slot owns `context` positions)
     std::uint32_t default_max_tokens = 1024;
     bool http_responses = true, http_capabilities = true, http_stream_receipts = true;  // ApiConfig defaults (on)
+    bool default_thinking = false;  // --default-thinking: chat mode unless the request enables thinking
     double http_sse_progress_interval = 1.0;
     double http_sse_keepalive = 10.0;                                                    // seconds, 0: off
     std::uint32_t import_parked = 1;  // imported states parked in slots at most (POST /admin/import-state)
@@ -1815,7 +1817,7 @@ void lead(const Args& initial, BatchForward& fwd, strix::dist::Communicator& com
     serve::ApiConfig config;
     config.model_id = a.model_id;
     config.default_max_tokens = a.default_max_tokens;
-    config.default_thinking = false;  // chat mode unless the request enables thinking
+    config.default_thinking = a.default_thinking;  // --default-thinking (off: chat mode unless the request enables thinking)
     config.sampling_policy = "greedy";
     config.responses = a.http_responses;
     config.capabilities = a.http_capabilities;
@@ -3505,6 +3507,11 @@ int main(int argc, char** argv) try {
         else if (s == "--http-api-key-file") a.api_key_file = next();
         else if (s == "--http-max-queue") a.max_queue = u32();
         else if (s == "--http-max-connections") a.max_connections = u32();
+        else if (s == "--default-thinking") {
+            const auto v = next();
+            if (v != "on" && v != "off") throw std::invalid_argument(s + " requires on|off");
+            a.default_thinking = v == "on";
+        }
         else if (s == "--http-responses" || s == "--http-capabilities" || s == "--http-stream-receipts") {
             const auto v = next();
             if (v != "on" && v != "off") throw std::invalid_argument(s + " requires on|off");
