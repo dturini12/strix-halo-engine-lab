@@ -473,8 +473,42 @@ void test_disk() {
         catch (const std::runtime_error&) { owned = true; }
         expect(owned, "a second owner cannot scan or delete a live namespace");
     }
+    {  // A full tier under a service-directory quota of the same size: the tier's LRU makes room before the quota is
+       // checked, so new states keep persisting (the quota counts files on disk, so evicting after it refused forever).
+        const auto x = random_tokens(512, rng), y = random_tokens(512, rng), z = random_tokens(512, rng);
+        std::uint64_t one = 0;
+        {
+            ds::PrefixCache probe(disk_options(fresh_dir("full-probe")));
+            expect(probe.insert(synthetic(x, 512U), 0U), "full-tier sizing probe");
+            one = probe.stats().disk_bytes;
+        }
+        const auto root = fresh_dir("full");
+        auto o = disk_options(root / "ns0", 0U, one * 2U + one / 2U);
+        o.quota_dir = root;
+        o.aggregate_disk_budget_bytes = one * 2U + one / 2U;
+        ds::PrefixCache cache(o);
+        // (one write at a time: a write in flight counts twice against the quota, as its reservation and its file)
+        expect(cache.insert(synthetic(x, 512U), 0U), "full tier: x fits");
+        cache.flush();
+        expect(cache.insert(synthetic(y, 512U), 0U), "full tier: y fits");
+        cache.flush();
+        expect(cache.stats().disk_snapshots == 2U && cache.stats().disk_resource_refused == 0U, "full tier: x and y on disk");
+        (void)cache.state(x, 512U, cache.lookup(x).key);
+        expect(cache.insert(synthetic(z, 512U), 0U), "full tier: z inserted");
+        cache.flush();
+        const auto st = cache.stats();
+        expect(st.disk_resource_refused == 0U, "full tier: the quota did not refuse z");
+        expect(st.disk_evicted_snapshots == 1U && st.disk_bytes <= one * 2U + one / 2U, "full tier: one state evicted, within budget");
+        cache.clear_ram();
+        expect(cache.lookup(z).resume == 512U && cache.lookup(z).disk, "full tier: z persisted");
+        expect(cache.lookup(x).resume == 512U && cache.lookup(y).resume == 0U, "full tier: the least recently used (y) went");
+        std::uint64_t physical = 0;
+        for (const auto& e : fs::recursive_directory_iterator(root))
+            if (e.is_regular_file() && (e.path().extension() == ".blk" || e.path().extension() == ".snp")) physical += e.file_size();
+        expect(physical <= one * 2U + one / 2U, "full tier: files on disk within the quota");
+    }
 #endif
-    for (const char* n : {"disk", "other", "late", "probe", "budget", "r0", "r1", "resources", "free-floor", "peer-denial", "aggregate", "aggregate-probe"}) fs::remove_all(fs::temp_directory_path() / (std::string("ds41-prefix-cache-test-") + n));
+    for (const char* n : {"disk", "other", "late", "probe", "budget", "r0", "r1", "resources", "free-floor", "peer-denial", "aggregate", "aggregate-probe", "full", "full-probe"}) fs::remove_all(fs::temp_directory_path() / (std::string("ds41-prefix-cache-test-") + n));
 }
 
 }  // namespace

@@ -102,4 +102,13 @@ inline bool prefix_memory_admitted(std::uint64_t available_mb, std::uint64_t res
     return available_mb != 0U && available_mb >= reserve_mb && available_mb - reserve_mb >= mb;
 }
 
+// The service-directory quota shared by the namespaces under --prefix-cache-dir: 4096 MiB, or the tier's own ceiling
+// (--prefix-cache-disk-mb) when that is larger, so a tier is never capped below its ceiling by its own directory.
+// An unlimited tier (0) gets no quota; the filesystem free-space floor still applies.
+inline std::uint64_t prefix_disk_quota_bytes(std::uint64_t disk_mb) {
+    constexpr std::uint64_t floor_mb = 4096;
+    if (disk_mb == 0U) return std::numeric_limits<std::uint64_t>::max();
+    return (disk_mb > floor_mb ? disk_mb : floor_mb) << 20U;
+}
+
 }  // namespace strix::deepseek41

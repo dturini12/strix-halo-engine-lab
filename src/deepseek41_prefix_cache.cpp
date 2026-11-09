@@ -1222,6 +1222,28 @@ bool PrefixCache::insert_disk(const AttentionState& s, std::uint64_t logits_fnv,
     std::uint64_t snap_file = kHeaderBytes + table.size() + 16U;
     for (const auto& L : s.layers) snap_file += 24U + L.ring.size() + L.carry.size() * 4U;
     const std::uint64_t need = snap_file + std::uint64_t{blocks - have} * block_file;
+    // Make room in this tier before the reservation: the service-directory quota counts the files on disk, so a
+    // full tier evicted only after a successful reservation was refused by its own quota forever (no write, no
+    // eviction).  The decision depends only on this tier's entries and `need`, which both ranks share, so ranks
+    // still evict alike whatever the resource admission below decides; the deletions are written out first so the
+    // quota no longer counts them.
+    if (options_.disk_budget_bytes != 0U) {
+        if (need > options_.disk_budget_bytes) {
+            ++stats_.disk_refused;
+            return false;
+        }
+        DiskEntry* tip = have > 0U ? disk_.at(keys[have - 1U]).get() : nullptr;
+        if (tip != nullptr) ++tip->children;
+        const auto evicted = stats_.disk_evicted_snapshots;
+        while (stats_.disk_bytes + need > options_.disk_budget_bytes && stats_.disk_snapshots > 0U) evict_disk_one();
+        if (tip != nullptr) --tip->children;
+        if (stats_.disk_bytes + need > options_.disk_budget_bytes) {
+            if (tip != nullptr) prune_disk(tip->key);
+            ++stats_.disk_refused;
+            return false;
+        }
+        if (stats_.disk_evicted_snapshots != evicted) writer_->flush();
+    }
     // Reserve before allocating/serializing payloads, and keep the active write charged.
     const bool reserved = writer_->reserve(need);
     std::error_code space_error;
@@ -1241,21 +1263,6 @@ bool PrefixCache::insert_disk(const AttentionState& s, std::uint64_t logits_fnv,
         std::fprintf(stderr, "prefix persistence bypass: %s\n", !reserved ? "queue or service-directory quota unavailable" :
                      !local ? "filesystem free-space floor" : "peer resource refusal");
         return false;
-    }
-    if (options_.disk_budget_bytes != 0U) {
-        if (need > options_.disk_budget_bytes) {
-            ++stats_.disk_refused;
-            return false;
-        }
-        DiskEntry* tip = have > 0U ? disk_.at(keys[have - 1U]).get() : nullptr;
-        if (tip != nullptr) ++tip->children;
-        while (stats_.disk_bytes + need > options_.disk_budget_bytes && stats_.disk_snapshots > 0U) evict_disk_one();
-        if (tip != nullptr) --tip->children;
-        if (stats_.disk_bytes + need > options_.disk_budget_bytes) {
-            if (tip != nullptr) prune_disk(tip->key);
-            ++stats_.disk_refused;
-            return false;
-        }
     }
     const std::uint64_t seq = ++clock_;
     for (std::uint32_t k = have; k < blocks; ++k) {

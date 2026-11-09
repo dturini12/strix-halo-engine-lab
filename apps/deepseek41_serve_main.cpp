@@ -578,6 +578,7 @@ public:
                 co.disk_budget_bytes = a.prefix_disk_mb << 20U;
                 co.min_free_bytes = 16384ULL << 20U;
                 co.quota_dir = a.prefix_dir;
+                co.aggregate_disk_budget_bytes = strix::deepseek41::prefix_disk_quota_bytes(a.prefix_disk_mb);
                 co.promote = false;  // retention admission is collective; disk reads never insert unilaterally
                 co.disk_admission = [&](bool local) {
                     std::array<std::uint64_t, 1> mine{local ? 1U : 0U}, peer{};
@@ -1955,7 +1956,9 @@ void lead(const Args& initial, BatchForward& fwd, strix::dist::Communicator& com
                 serve::Json d = serve::Json::object();
                 d.set("budget_bytes", serve::Json(a.prefix_disk_mb << 20U));
                 d.set("tier_unlimited", serve::Json(a.prefix_disk_mb == 0U));
-                d.set("service_directory_budget_bytes", serve::Json(std::uint64_t{4096} << 20U));
+                const auto quota = strix::deepseek41::prefix_disk_quota_bytes(a.prefix_disk_mb);
+                d.set("service_directory_budget_bytes", serve::Json(quota == UINT64_MAX ? std::uint64_t{0} : quota));
+                d.set("service_directory_unlimited", serve::Json(quota == UINT64_MAX));
                 d.set("queue_budget_bytes", serve::Json(std::uint64_t{128} << 20U));
                 d.set("min_free_bytes", serve::Json(std::uint64_t{16384} << 20U));
                 d.set("promote", serve::Json(false));
@@ -3576,7 +3579,11 @@ int main(int argc, char** argv) try {
                  static_cast<unsigned long long>(a.prefix_reserve_mb), a.prefix_inrun ? 1U : 0U, a.prefix_inrun_reach,
                  a.prefix_before_tail ? 1U : 0U, a.prefix_session ? 1U : 0U, a.prefix_dir.empty() ? "off" : "explicit",
                  a.prefix_dir.empty() ? "disabled" : a.prefix_disk_mb == 0U ? "unlimited per tier (numeric zero)" : (std::to_string(a.prefix_disk_mb) + " MiB").c_str());
-    if (!a.prefix_dir.empty()) std::fprintf(stderr, "prefix disk guard: service directory quota 4096 MiB, queued payloads 128 MiB, free-space floor 16384 MiB; disk promotion off\n");
+    if (!a.prefix_dir.empty()) {
+        const auto quota = strix::deepseek41::prefix_disk_quota_bytes(a.prefix_disk_mb);
+        const std::string q = quota == UINT64_MAX ? std::string("unlimited") : std::to_string(quota >> 20U) + " MiB";
+        std::fprintf(stderr, "prefix disk guard: service directory quota %s, queued payloads 128 MiB, free-space floor 16384 MiB; disk promotion off\n", q.c_str());
+    }
     if (a.slots == 0U || a.slots > BatchForward::configured_row_limit()) throw std::invalid_argument("--slots exceeds STRIX_DS41_BATCH_ROWS16 step limit (8, or 16 when enabled)");
     if (a.slots > strix::deepseek41::serve_observe::kMaxStepOwners)  // the per-step draft accounting covers every slot
         throw std::invalid_argument("--slots exceeds the per-step draft accounting limit (64)");
