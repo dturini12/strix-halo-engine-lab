@@ -640,6 +640,12 @@ target_link_libraries(strix-inspect-gguf PRIVATE strix_core)
 strix_target_warnings(strix-inspect-gguf)
 
 # Host-only serving front end (no GPU): JSON, tokenizer, chat template, HTTP and the API mapping.
+# Picture decoding for image input (PNG, JPEG, base64/data URLs), written for this engine; no third-party decoder.
+add_library(strix_image STATIC src/image/inflate.cpp src/image/png.cpp src/image/jpeg.cpp)
+target_include_directories(strix_image PUBLIC include)
+target_compile_features(strix_image PUBLIC cxx_std_20)
+strix_target_warnings(strix_image)
+
 add_library(strix_serve STATIC
     src/serve/json_constraint.cpp
     src/serve/constraint_selection.cpp
@@ -795,6 +801,10 @@ if(BUILD_TESTING)
     strix_target_warnings(strix-serve-deepseek-chat-tests)
     add_test(NAME strix-serve-deepseek-chat-tests COMMAND strix-serve-deepseek-chat-tests
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/serve/deepseek_v41_chat_cases.json)
+    add_executable(strix-image-decode-tests tests/image_decode_tests.cpp)
+    target_link_libraries(strix-image-decode-tests PRIVATE strix_image strix_core strix_serve_json)
+    strix_target_warnings(strix-image-decode-tests)
+    add_test(NAME strix-image-decode-tests COMMAND strix-image-decode-tests ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/image)
     add_executable(strix-serve-api-tests tests/serve_api_tests.cpp)
     target_link_libraries(strix-serve-api-tests PRIVATE strix_serve strix_core)
     strix_target_warnings(strix-serve-api-tests)
