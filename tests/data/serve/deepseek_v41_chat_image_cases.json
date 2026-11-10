@@ -1,0 +1,421 @@
+[
+ {
+  "messages": [
+   {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "What is in this picture?"
+     },
+     {
+      "type": "image_url",
+      "image_url": {
+       "url": "data:image/png;base64,IMG1"
+      }
+     }
+    ]
+   }
+  ],
+  "tools": null,
+  "thinking": false,
+  "reasoning_effort": null,
+  "preserve_thinking": false,
+  "expected": "<｜begin▁of▁sentence｜><｜User｜>What is in this picture?\n\n<｜deepseek_image｜><｜Assistant｜></think>",
+  "images": [
+   "data:image/png;base64,IMG1"
+  ]
+ },
+ {
+  "messages": [
+   {
+    "role": "user",
+    "content": [
+     {
+      "type": "image_url",
+      "image_url": {
+       "url": "data:image/png;base64,IMG1"
+      }
+     },
+     {
+      "type": "text",
+      "text": "Compare with"
+     },
+     {
+      "type": "image_url",
+      "image_url": {
+       "url": "data:image/png;base64,IMG2"
+      }
+     },
+     {
+      "type": "text",
+      "text": "Which is larger?"
+     }
+    ]
+   }
+  ],
+  "tools": null,
+  "thinking": true,
+  "reasoning_effort": null,
+  "preserve_thinking": false,
+  "expected": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜><｜deepseek_image｜>\n\nCompare with\n\n<｜deepseek_image｜>\n\nWhich is larger?<｜Assistant｜><think>",
+  "images": [
+   "data:image/png;base64,IMG1",
+   "data:image/png;base64,IMG2"
+  ]
+ },
+ {
+  "messages": [
+   {
+    "role": "user",
+    "content": [
+     {
+      "type": "image_url",
+      "image_url": {
+       "url": "data:image/png;base64,IMG1"
+      }
+     }
+    ]
+   }
+  ],
+  "tools": null,
+  "thinking": true,
+  "reasoning_effort": null,
+  "preserve_thinking": false,
+  "expected": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜><｜deepseek_image｜><｜Assistant｜><think>",
+  "images": [
+   "data:image/png;base64,IMG1"
+  ]
+ },
+ {
+  "messages": [
+   {
+    "role": "system",
+    "content": "You are a UI tester."
+   },
+   {
+    "role": "user",
+    "content": "Open the page and check the layout."
+   },
+   {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+     {
+      "id": "c1",
+      "type": "function",
+      "function": {
+       "name": "screenshot",
+       "arguments": "{\"url\": \"http://x\"}"
+      }
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "tool_call_id": "c1",
+    "content": [
+     {
+      "type": "text",
+      "text": "Screenshot of http://x:"
+     },
+     {
+      "type": "image_url",
+      "image_url": {
+       "url": "data:image/png;base64,IMG1"
+      }
+     }
+    ]
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "screenshot",
+     "description": "Take a screenshot",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "url": {
+        "type": "string"
+       }
+      }
+     }
+    }
+   }
+  ],
+  "thinking": true,
+  "reasoning_effort": null,
+  "preserve_thinking": false,
+  "expected": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nYou are a UI tester.\n\n## Tools\n\nYou have access to a set of tools to help answer the user's question. You can invoke tools by writing a \"<｜DSML｜ calls>\" block like the following:\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"$TOOL_NAME\">\n<｜DSML｜ parameter name=\"$PARAMETER_NAME\" string=\"true|false\">$PARAMETER_VALUE</｜DSML｜ parameter>\n...\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"$TOOL_NAME2\">\n...\n</｜DSML｜ invoke>\n</｜DSML｜ calls>\n\nString parameters should be specified as is and set `string=\"true\"`. For all other types (numbers, booleans, arrays, objects), pass the value in JSON format and set `string=\"false\"`.\n\nIf thinking_mode is enabled (triggered by <think>), you MUST output your complete reasoning inside <think>...</think> BEFORE any tool calls or final response.\n\nOtherwise, output directly after </think> with tool calls or final response.\n\n### Available Tool Schemas\n\n{\"name\": \"screenshot\", \"description\": \"Take a screenshot\", \"parameters\": {\"type\": \"object\", \"properties\": {\"url\": {\"type\": \"string\"}}}}\n\nYou MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.\n<｜User｜>Open the page and check the layout.<｜Assistant｜><think></think>\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"screenshot\">\n<｜DSML｜ parameter name=\"url\" string=\"true\">http://x</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜><｜User｜><tool_result>Screenshot of http://x:\n\n<｜deepseek_image｜></tool_result><｜Assistant｜><think>",
+  "images": [
+   "data:image/png;base64,IMG1"
+  ]
+ },
+ {
+  "messages": [
+   {
+    "role": "user",
+    "content": "Take two screenshots."
+   },
+   {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+     {
+      "id": "a",
+      "type": "function",
+      "function": {
+       "name": "screenshot",
+       "arguments": {
+        "url": "http://a"
+       }
+      }
+     },
+     {
+      "id": "b",
+      "type": "function",
+      "function": {
+       "name": "screenshot",
+       "arguments": {
+        "url": "http://b"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "tool_call_id": "b",
+    "content": [
+     {
+      "type": "image_url",
+      "image_url": {
+       "url": "data:image/png;base64,IMG2"
+      }
+     },
+     {
+      "type": "text",
+      "text": "page b"
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "tool_call_id": "a",
+    "content": [
+     {
+      "type": "text",
+      "text": "page a"
+     },
+     {
+      "type": "image_url",
+      "image_url": {
+       "url": "data:image/png;base64,IMG1"
+      }
+     }
+    ]
+   },
+   {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "And this one:"
+     },
+     {
+      "type": "image_url",
+      "image_url": {
+       "url": "data:image/png;base64,IMG3"
+      }
+     }
+    ]
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "screenshot",
+     "description": "Take a screenshot",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "url": {
+        "type": "string"
+       }
+      }
+     }
+    }
+   }
+  ],
+  "thinking": false,
+  "reasoning_effort": null,
+  "preserve_thinking": false,
+  "expected": "<｜begin▁of▁sentence｜><｜System｜>\n\n## Tools\n\nYou have access to a set of tools to help answer the user's question. You can invoke tools by writing a \"<｜DSML｜ calls>\" block like the following:\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"$TOOL_NAME\">\n<｜DSML｜ parameter name=\"$PARAMETER_NAME\" string=\"true|false\">$PARAMETER_VALUE</｜DSML｜ parameter>\n...\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"$TOOL_NAME2\">\n...\n</｜DSML｜ invoke>\n</｜DSML｜ calls>\n\nString parameters should be specified as is and set `string=\"true\"`. For all other types (numbers, booleans, arrays, objects), pass the value in JSON format and set `string=\"false\"`.\n\nIf thinking_mode is enabled (triggered by <think>), you MUST output your complete reasoning inside <think>...</think> BEFORE any tool calls or final response.\n\nOtherwise, output directly after </think> with tool calls or final response.\n\n### Available Tool Schemas\n\n{\"name\": \"screenshot\", \"description\": \"Take a screenshot\", \"parameters\": {\"type\": \"object\", \"properties\": {\"url\": {\"type\": \"string\"}}}}\n\nYou MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.\n<｜User｜>Take two screenshots.<｜Assistant｜></think>\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"screenshot\">\n<｜DSML｜ parameter name=\"url\" string=\"true\">http://a</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"screenshot\">\n<｜DSML｜ parameter name=\"url\" string=\"true\">http://b</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜><｜User｜><tool_result>page a\n\n<｜deepseek_image｜></tool_result>\n\n<tool_result><｜deepseek_image｜>\n\npage b</tool_result>\n\nAnd this one:\n\n<｜deepseek_image｜><｜Assistant｜></think>",
+  "images": [
+   "data:image/png;base64,IMG1",
+   "data:image/png;base64,IMG2",
+   "data:image/png;base64,IMG3"
+  ]
+ },
+ {
+  "messages": [
+   {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "first part"
+     },
+     {
+      "type": "text",
+      "text": "second part"
+     }
+    ]
+   },
+   {
+    "role": "assistant",
+    "content": [
+     {
+      "type": "text",
+      "text": "answer one"
+     },
+     {
+      "type": "text",
+      "text": "answer two"
+     }
+    ]
+   },
+   {
+    "role": "user",
+    "content": "thanks"
+   }
+  ],
+  "tools": null,
+  "thinking": false,
+  "reasoning_effort": null,
+  "preserve_thinking": false,
+  "expected": "<｜begin▁of▁sentence｜><｜User｜>first part\n\nsecond part<｜Assistant｜></think>answer one\n\nanswer two<｜end▁of▁sentence｜><｜User｜>thanks<｜Assistant｜></think>",
+  "images": []
+ },
+ {
+  "messages": [
+   {
+    "role": "system",
+    "content": [
+     {
+      "type": "text",
+      "text": "rule one"
+     },
+     {
+      "type": "text",
+      "text": "rule two"
+     }
+    ]
+   },
+   {
+    "role": "user",
+    "content": [
+     {
+      "type": "image_url",
+      "image_url": {
+       "url": "data:image/png;base64,IMG1"
+      }
+     },
+     {
+      "type": "text",
+      "text": "describe"
+     }
+    ]
+   },
+   {
+    "role": "assistant",
+    "content": "A red circle."
+   },
+   {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "now this"
+     },
+     {
+      "type": "image_url",
+      "image_url": {
+       "url": "data:image/png;base64,IMG2"
+      }
+     }
+    ]
+   }
+  ],
+  "tools": null,
+  "thinking": true,
+  "reasoning_effort": null,
+  "preserve_thinking": false,
+  "expected": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nrule one\n\nrule two<｜User｜><｜deepseek_image｜>\n\ndescribe<｜Assistant｜></think>A red circle.<｜end▁of▁sentence｜><｜User｜>now this\n\n<｜deepseek_image｜><｜Assistant｜><think>",
+  "images": [
+   "data:image/png;base64,IMG1",
+   "data:image/png;base64,IMG2"
+  ]
+ },
+ {
+  "messages": [
+   {
+    "role": "user",
+    "content": "run it"
+   },
+   {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+     {
+      "id": "t",
+      "type": "function",
+      "function": {
+       "name": "screenshot",
+       "arguments": "{}"
+      }
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "tool_call_id": "t",
+    "content": [
+     {
+      "type": "text",
+      "text": "line one"
+     },
+     {
+      "type": "text",
+      "text": "line two"
+     }
+    ]
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "screenshot",
+     "description": "Take a screenshot",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "url": {
+        "type": "string"
+       }
+      }
+     }
+    }
+   }
+  ],
+  "thinking": true,
+  "reasoning_effort": null,
+  "preserve_thinking": false,
+  "expected": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n\n\n## Tools\n\nYou have access to a set of tools to help answer the user's question. You can invoke tools by writing a \"<｜DSML｜ calls>\" block like the following:\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"$TOOL_NAME\">\n<｜DSML｜ parameter name=\"$PARAMETER_NAME\" string=\"true|false\">$PARAMETER_VALUE</｜DSML｜ parameter>\n...\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"$TOOL_NAME2\">\n...\n</｜DSML｜ invoke>\n</｜DSML｜ calls>\n\nString parameters should be specified as is and set `string=\"true\"`. For all other types (numbers, booleans, arrays, objects), pass the value in JSON format and set `string=\"false\"`.\n\nIf thinking_mode is enabled (triggered by <think>), you MUST output your complete reasoning inside <think>...</think> BEFORE any tool calls or final response.\n\nOtherwise, output directly after </think> with tool calls or final response.\n\n### Available Tool Schemas\n\n{\"name\": \"screenshot\", \"description\": \"Take a screenshot\", \"parameters\": {\"type\": \"object\", \"properties\": {\"url\": {\"type\": \"string\"}}}}\n\nYou MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.\n<｜User｜>run it<｜Assistant｜><think></think>\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"screenshot\">\n\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜><｜User｜><tool_result>line one\n\nline two</tool_result><｜Assistant｜><think>",
+  "images": []
+ }
+]

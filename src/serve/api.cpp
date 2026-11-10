@@ -1,4 +1,5 @@
 #include "strix/serve/api.hpp"
+#include "strix/image/image_decode.hpp"
 
 #include "strix/serve/chat_template.hpp"
 #include "strix/serve/json_constraint.hpp"
@@ -362,6 +363,14 @@ struct ApiService::Impl {
                 "prefill_progress", "response_storage", "required_tool_choice", "named_tool_choice",
                 "grammar", "background", "conversation", "encrypted_reasoning", "image_input", "file_input"}) out.set(name, Json(false));
         out.set("prefill_progress", Json(config.engine_progress));
+        out.set("image_input", Json(config.image_input.has_value()));
+        if (config.image_input) {
+            Json im = Json::object();
+            im.set("formats", Json("png, jpeg (base64 data URLs)"));
+            im.set("max_images", Json(static_cast<std::int64_t>(config.image_input->max_images)));
+            im.set("max_tokens", Json(static_cast<std::int64_t>(config.image_input->max_tokens)));
+            out.set("images", std::move(im));
+        }
         out.set("thinking_budget", Json(config.engine_thinking_budget));
         out.set("thinking_budget_policy", config.engine_thinking_budget ? Json("thinking-budget-v1") : Json());
         out.set("logprobs", Json(config.engine_logprobs)); out.set("penalties", Json(config.engine_logit_transforms)); out.set("logit_bias", Json(config.engine_logit_transforms));
@@ -577,7 +586,54 @@ struct ApiService::Impl {
     }
 
     // ---- chat ----
-    struct ChatPrompt { std::vector<std::uint32_t> tokens; bool thinking; Json tools; std::uint32_t stable_prefix = 0; };
+    struct ChatPrompt { std::vector<std::uint32_t> tokens; bool thinking; Json tools; std::uint32_t stable_prefix = 0; std::vector<PromptImage> images; };
+    // The bytes of one image part (OpenAI image_url string or {url}, Responses input_image; base64 data URLs only).
+    static std::vector<std::uint8_t> image_part_bytes(const Json& part) {
+        const Json* u = part.find("image_url");
+        std::string url;
+        if (u && u->is_string()) url = u->as_string();
+        else if (u && u->is_object()) {
+            if (const auto* x = u->find("url"); x && x->is_string()) url = x->as_string();
+        }
+        if (url.empty()) throw ApiError(400, "invalid_request_error", "image input: an image part needs image_url with a base64 data URL", "messages");
+        try {
+            return image::data_url_bytes(url);
+        } catch (const image::ImageError& e) {
+            throw ApiError(400, "invalid_request_error", e.what(), "messages");
+        }
+    }
+    // Prompt tokens with each image placeholder of `text` replaced by the prepared picture's span of the image token.
+    void expand_images(const std::string& text, const std::vector<Json>& parts, ChatPrompt& out) const {
+        const auto& in = *config.image_input;
+        if (parts.size() > in.max_images)
+            throw ApiError(400, "invalid_request_error", "image input: at most " + std::to_string(in.max_images) + " pictures per request", "messages");
+        std::size_t at = 0, total = 0;
+        for (const auto& part : parts) {
+            const auto next = text.find(in.placeholder, at);
+            if (next == std::string::npos) throw std::runtime_error("image placeholder count mismatch");
+            const auto seg = tokenizer->encode(std::string_view(text).substr(at, next - at), true);
+            out.tokens.insert(out.tokens.end(), seg.begin(), seg.end());
+            auto bytes = std::make_shared<std::vector<std::uint8_t>>(image_part_bytes(part));
+            PromptImage img;
+            try {
+                img = in.prepare(*bytes);
+            } catch (const std::exception& e) {
+                throw ApiError(400, "invalid_request_error", e.what(), "messages");
+            }
+            total += img.tokens;
+            if (total > in.max_tokens)
+                throw ApiError(400, "invalid_request_error", "image input: the pictures need " + std::to_string(total) + " tokens or more, over the " +
+                                   std::to_string(in.max_tokens) + " allowed per request", "messages");
+            img.start = static_cast<std::uint32_t>(out.tokens.size());
+            img.encoded = std::move(bytes);
+            out.tokens.insert(out.tokens.end(), img.tokens, in.token_id);
+            out.images.push_back(std::move(img));
+            at = next + in.placeholder.size();
+        }
+        if (text.find(in.placeholder, at) != std::string::npos) throw std::runtime_error("image placeholder count mismatch");
+        const auto seg = tokenizer->encode(std::string_view(text).substr(at), true);
+        out.tokens.insert(out.tokens.end(), seg.begin(), seg.end());
+    }
     ChatPrompt chat_prompt(const Json& body) const {
         const auto* messages = body.find("messages");
         if (!messages || !messages->is_array() || messages->size() == 0U)
@@ -609,10 +665,13 @@ struct ApiService::Impl {
             else input.reasoning_effort = effort;
         }
         std::string text;
+        std::vector<Json> image_parts;
+        if (config.image_input) input.images = &image_parts;
         try { text = config.chat_renderer ? config.chat_renderer(input) : render_chat_template(input); }
         catch (const ChatTemplateError& error) { throw ApiError(400, "invalid_request_error", error.what(), "messages"); }
         ChatPrompt out;
-        out.tokens = tokenizer->encode(text, true);
+        if (image_parts.empty()) out.tokens = tokenizer->encode(text, true);
+        else expand_images(text, image_parts, out);
         out.thinking = !input.enable_thinking || *input.enable_thinking;
         out.tools = input.tools;
         // the stable prefix: the leading system messages and the tools rendered alone, when their tokens begin the prompt
@@ -628,9 +687,11 @@ struct ApiService::Impl {
             for (std::size_t i = 0; i < lead; ++i) system.push(normalized.as_array()[i]);
             head.messages = system;
             head.add_generation_prompt = false;
+            std::vector<Json> head_images;
+            head.images = input.images ? &head_images : nullptr;
             try {
                 const auto ids = tokenizer->encode(config.chat_renderer ? config.chat_renderer(head) : render_chat_template(head), true);
-                if (ids.size() < out.tokens.size() && std::equal(ids.begin(), ids.end(), out.tokens.begin()))
+                if (head_images.empty() && ids.size() < out.tokens.size() && std::equal(ids.begin(), ids.end(), out.tokens.begin()))
                     out.stable_prefix = static_cast<std::uint32_t>(ids.size());
             } catch (const ChatTemplateError&) {}
         }
@@ -963,8 +1024,9 @@ struct ApiService::Impl {
     }
 
     std::shared_ptr<GenerationTicket> submit(std::vector<std::uint32_t> prompt, std::uint32_t max_tokens, const SamplingParameters& sampling,
-        const Json& body, std::uint32_t stable_prefix = 0, std::shared_ptr<const ConstraintSpec> spec = {}) {
+        const Json& body, std::uint32_t stable_prefix = 0, std::shared_ptr<const ConstraintSpec> spec = {}, std::vector<PromptImage> images = {}) {
         GenerationJob job;
+        job.images = std::move(images);
         job.constraint = std::move(spec);
         if (const auto* policy = body.find("state_cache")) {
             const auto* retain = policy->is_object() ? policy->find("retain") : nullptr;
@@ -989,6 +1051,8 @@ struct ApiService::Impl {
                 throw ApiError(400, "invalid_request_error", "sessions require greedy sampling", "temperature");
             if (job.constraint)
                 throw ApiError(400, "invalid_request_error", "sessions do not support constrained output", "session");
+            if (!job.images.empty())
+                throw ApiError(400, "invalid_request_error", "sessions do not support image input", "session");
         }
         if (const auto* ngram = body.find("ngram_draft"); ngram && !ngram->is_null()) {
             if (!ngram->is_bool()) throw ApiError(400, "invalid_request_error", "ngram_draft must be a boolean", "ngram_draft");
@@ -1165,7 +1229,7 @@ struct ApiService::Impl {
         const auto limit = max_tokens(body, prompt.tokens.size());
         const auto spec = constraint(body, prompt, sampling_params, stops, limit);
         const auto initial_receipt = config.stream_receipts || spec ? receipt(nullptr, note, body, limit, sampling_params, spec) : Json();
-        auto ticket = submit(prompt.tokens, limit, sampling_params, body, prompt.stable_prefix, spec);
+        auto ticket = submit(prompt.tokens, limit, sampling_params, body, prompt.stable_prefix, spec, prompt.images);
         queue_headers(response, *ticket);
         const auto id = random_id("chatcmpl-");
         const auto created = unix_now();
@@ -1410,7 +1474,34 @@ struct ApiService::Impl {
                 if (!role || !role->is_string() || (role->as_string() != "user" && role->as_string() != "system" &&
                         role->as_string() != "developer" && role->as_string() != "assistant")) reject(param + ".role", "unsupported message role");
                 if (!content) reject(param + ".content", "message content is required");
-                m = message(role->as_string(), text_parts(*content, param + ".content", false));
+                bool has_image = false;
+                if (config.image_input && content->is_array())
+                    for (const auto& part : content->as_array())
+                        if (const auto* pt = part.find("type"); pt && pt->is_string() && pt->as_string() == "input_image") has_image = true;
+                if (has_image) {  // text runs and image parts in order (OpenAI chat content parts)
+                    Json parts = Json::array();
+                    std::string run;
+                    const auto flush = [&] {
+                        if (!run.empty()) { Json t = Json::object(); t.set("type", Json("text")); t.set("text", Json(run)); parts.push(std::move(t)); run.clear(); }
+                    };
+                    for (const auto& part : content->as_array()) {
+                        const auto* pt = part.find("type");
+                        if (pt && pt->is_string() && pt->as_string() == "input_image") {
+                            flush();
+                            const auto* url = part.find("image_url");
+                            if (!url || !url->is_string()) reject(param + ".content", "input_image needs image_url (a base64 data URL)");
+                            Json ip = Json::object(); ip.set("type", Json("image_url")); ip.set("image_url", *url);
+                            parts.push(std::move(ip));
+                        } else {
+                            Json one = Json::array(); one.push(part);
+                            run += text_parts(one, param + ".content", false);
+                        }
+                    }
+                    flush();
+                    m = Json::object(); m.set("role", *role); m.set("content", std::move(parts));
+                } else {
+                    m = message(role->as_string(), text_parts(*content, param + ".content", false));
+                }
             } else if (kind == "function_call" || kind == "function_call_output") {
                 const auto* call_id = item.find("call_id");
                 if (!call_id || !call_id->is_string() || call_id->as_string().empty()) reject(param + ".call_id", "call_id must be a non-empty string");
@@ -1461,7 +1552,7 @@ struct ApiService::Impl {
         const auto progress_interval = progress_seconds(chat);
         const auto limit = max_tokens(chat, prompt.tokens.size());
         const auto spec = constraint(body, prompt, params, stops, limit, true);
-        auto ticket = submit(prompt.tokens, limit, params, chat, prompt.stable_prefix, spec);
+        auto ticket = submit(prompt.tokens, limit, params, chat, prompt.stable_prefix, spec, prompt.images);
         const auto id = random_id("resp_");
         const auto created = unix_now();
         RecentRequest entry{id, "responses", "ok", created};
@@ -1700,6 +1791,23 @@ struct ApiService::Impl {
     }
 
     // ---- Anthropic messages ----
+    // An Anthropic image block ({"type":"image","source":{"type":"base64","media_type":...,"data":...}}) as an OpenAI
+    // image part with a data URL; URL sources are refused (base64 only).
+    static Json anthropic_image(const Json& block) {
+        const auto* src = block.find("source");
+        const auto* stype = src && src->is_object() ? src->find("type") : nullptr;
+        if (!stype || !stype->is_string() || stype->as_string() != "base64")
+            throw ApiError(400, "invalid_request_error", "image input: only base64 image sources are supported", "messages");
+        const auto* media = src->find("media_type");
+        const auto* data = src->find("data");
+        if (!data || !data->is_string()) throw ApiError(400, "invalid_request_error", "image input: an image source needs base64 data", "messages");
+        Json url = Json::object();
+        url.set("url", Json("data:" + (media && media->is_string() ? media->as_string() : std::string("image/png")) + ";base64," + data->as_string()));
+        Json part = Json::object();
+        part.set("type", Json("image_url"));
+        part.set("image_url", std::move(url));
+        return part;
+    }
     Json anthropic_to_chat(const Json& body, bool& thinking) const {
         Json messages = Json::array();
         if (const auto* system = body.find("system"); system && !system->is_null()) {
@@ -1722,10 +1830,15 @@ struct ApiService::Impl {
             if (!content || !content->is_array()) throw ApiError(400, "invalid_request_error", "message content must be a string or an array", "messages");
             std::string text, reasoning;
             Json calls = Json::array();
+            Json parts = Json::array();  // set when the message has pictures: text runs and image parts in order
+            const auto flush_text = [&] {
+                if (!text.empty()) { Json t = Json::object(); t.set("type", Json("text")); t.set("text", Json(text)); parts.push(std::move(t)); text.clear(); }
+            };
             for (const auto& block : content->as_array()) {
                 const auto* type = block.find("type");
                 const auto kind = type && type->is_string() ? type->as_string() : std::string{};
                 if (kind == "text") { if (const auto* t = block.find("text"); t && t->is_string()) text += t->as_string(); }
+                else if (kind == "image") { flush_text(); parts.push(anthropic_image(block)); }
                 else if (kind == "thinking") { if (const auto* t = block.find("thinking"); t && t->is_string()) reasoning += t->as_string(); }
                 else if (kind == "tool_use") {
                     Json function = Json::object();
@@ -1735,17 +1848,40 @@ struct ApiService::Impl {
                     calls.push(std::move(call));
                 } else if (kind == "tool_result") {
                     std::string result;
+                    Json result_parts = Json::array();  // used when the result has pictures
+                    bool result_images = false;
                     if (const auto* c = block.find("content")) {
                         if (c->is_string()) result = c->as_string();
-                        else if (c->is_array()) for (const auto& part : c->as_array()) if (const auto* t = part.find("text"); t && t->is_string()) result += t->as_string();
+                        else if (c->is_array()) {
+                            for (const auto& part : c->as_array()) {
+                                const auto* pt = part.find("type");
+                                if (pt && pt->is_string() && pt->as_string() == "image") { result_images = true; break; }
+                            }
+                            for (const auto& part : c->as_array()) {
+                                const auto* pt = part.find("type");
+                                if (pt && pt->is_string() && pt->as_string() == "image") result_parts.push(anthropic_image(part));
+                                else if (const auto* t = part.find("text"); t && t->is_string()) {
+                                    if (!result_images) result += t->as_string();
+                                    else { Json tp = Json::object(); tp.set("type", Json("text")); tp.set("text", *t); result_parts.push(std::move(tp)); }
+                                }
+                            }
+                        }
                     }
+                    if (parts.size()) { flush_text(); Json m = Json::object(); m.set("role", *role); m.set("content", std::move(parts)); messages.push(std::move(m)); parts = Json::array(); }
                     if (!text.empty()) { Json m = Json::object(); m.set("role", *role); m.set("content", Json(text)); messages.push(std::move(m)); text.clear(); }
-                    Json m = Json::object(); m.set("role", Json("tool")); m.set("content", Json(result));
+                    Json m = Json::object(); m.set("role", Json("tool"));
+                    if (result_images) m.set("content", std::move(result_parts)); else m.set("content", Json(result));
                     messages.push(std::move(m));
                 } else if (kind == "redacted_thinking") {
                 } else throw ApiError(400, "invalid_request_error", "unsupported content block type " + kind, "messages");
             }
-            if (!text.empty() || calls.size() || !reasoning.empty() || role->as_string() == "assistant") {
+            if (parts.size()) {  // a message with pictures keeps its text runs and image parts as content parts
+                flush_text();
+                Json m = Json::object(); m.set("role", *role); m.set("content", std::move(parts));
+                if (!reasoning.empty()) m.set("reasoning_content", Json(reasoning));
+                if (calls.size()) m.set("tool_calls", std::move(calls));
+                messages.push(std::move(m));
+            } else if (!text.empty() || calls.size() || !reasoning.empty() || role->as_string() == "assistant") {
                 Json m = Json::object(); m.set("role", *role); m.set("content", Json(text));
                 if (!reasoning.empty()) m.set("reasoning_content", Json(reasoning));
                 if (calls.size()) m.set("tool_calls", std::move(calls));
@@ -1809,7 +1945,7 @@ struct ApiService::Impl {
         const auto limit = max_tokens(body, prompt.tokens.size());
         const auto spec = constraint(chat, prompt, sampling_params, stops, limit);
         const auto initial_receipt = config.stream_receipts || spec ? receipt(nullptr, note, body, limit, sampling_params, spec) : Json();
-        auto ticket = submit(prompt.tokens, limit, sampling_params, body, prompt.stable_prefix, spec);
+        auto ticket = submit(prompt.tokens, limit, sampling_params, body, prompt.stable_prefix, spec, prompt.images);
         queue_headers(response, *ticket);
         const auto id = random_id("msg_");
         RecentRequest entry{id, "messages", "ok", unix_now()};

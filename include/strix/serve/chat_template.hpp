@@ -25,6 +25,9 @@ struct ChatTemplateInput {
     std::optional<bool> enable_thinking;          // unset = thinking on
     std::optional<std::string> reasoning_effort;  // xhigh (default), high (= xhigh), medium, low
     std::optional<bool> preserve_thinking;        // unset = keep earlier reasoning blocks
+    // Renderers that accept pictures write a placeholder per image part and append the part here, in prompt order;
+    // null: image parts are refused.
+    std::vector<Json>* images = nullptr;
 };
 
 // Renders the prompt text exactly as the model's template does for text content. Image and

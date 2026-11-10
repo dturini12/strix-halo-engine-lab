@@ -8,6 +8,7 @@
 #include "strix/serve/health.hpp"
 
 #include <functional>
+#include <span>
 #include <memory>
 #include <optional>
 #include <string>
@@ -51,6 +52,18 @@ struct ApiConfig {
     std::function<std::string(const ChatTemplateInput&)> chat_renderer;
     std::function<AssistantOutput(const std::string& text, bool thinking, const Json& tools)> output_parser;
     std::string tool_call_marker = "<tool_call>";  // streaming: content from this marker on is kept for the tool parse
+    // Image input on the chat routes (OpenAI image_url / Responses input_image / Anthropic image, base64 data only).
+    // The chat renderer writes `placeholder` per picture; each becomes `prepare(bytes).tokens` copies of `token_id`.
+    // Unset: image parts are refused.
+    struct ImageInput {
+        std::string placeholder;
+        std::uint32_t token_id = 0;
+        std::uint32_t max_images = 8;     // per request
+        std::uint32_t max_tokens = 8192;  // image span tokens per request
+        // decode and plan one picture; throws std::exception whose message is shown to the client
+        std::function<PromptImage(std::span<const std::uint8_t> bytes)> prepare;
+    };
+    std::optional<ImageInput> image_input;
     // Engine members added to /api/status (memory, slots, group) and lines added to /metrics.
     std::function<void(Json& status)> status_extra;
     std::function<std::string()> metrics_extra;

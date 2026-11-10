@@ -1,6 +1,7 @@
 // DeepSeek V4.1 chat encoding: the C++ renderer equals the model release's reference encoder (encoding.py) on the
 // recorded cases, and the output parser splits reasoning, content and DSML tool calls.
-//   strix-serve-deepseek-chat-tests tests/data/serve/deepseek_v41_chat_cases.json
+//   strix-serve-deepseek-chat-tests tests/data/serve/deepseek_v41_chat_cases.json [deepseek_v41_chat_image_cases.json]
+// The image cases (tools/ds41/make_chat_image_cases.py) also check the image parts' prompt order.
 #include "strix/serve/deepseek_chat.hpp"
 #include "strix/serve/json.hpp"
 
@@ -23,7 +24,7 @@ void check(bool ok, const std::string& what) {
 
 int main(int argc, char** argv) try {
     using namespace strix::serve;
-    if (argc != 2) {
+    if (argc != 2 && argc != 3) {
         std::cerr << "usage: strix-serve-deepseek-chat-tests CASES.json\n";
         return 2;
     }
@@ -50,6 +51,56 @@ int main(int argc, char** argv) try {
         ++index;
     }
     std::cout << "deepseek chat: " << equal << " of " << index << " cases equal the reference encoder\n";
+    if (argc == 3) {  // image cases: prompt text with placeholders and the image parts in prompt order
+        std::ifstream in2(argv[2], std::ios::binary);
+        const auto icases = parse_json(std::string((std::istreambuf_iterator<char>(in2)), std::istreambuf_iterator<char>()));
+        std::size_t n = 0, ok = 0;
+        for (const auto& c : icases.as_array()) {
+            ChatTemplateInput input;
+            input.messages = *c.find("messages");
+            if (const auto* t = c.find("tools"); t && t->is_array()) input.tools = *t;
+            input.enable_thinking = c.find("thinking")->as_bool();
+            std::vector<Json> images;
+            input.images = &images;
+            const auto got = render_deepseek_v41_chat(input);
+            const auto& want = c.find("expected")->as_string();
+            std::vector<std::string> urls;
+            for (const auto& im : images) {
+                const auto* u = im.find("image_url");
+                urls.push_back(u && u->is_object() ? u->find("url")->as_string() : u && u->is_string() ? u->as_string() : std::string{});
+            }
+            std::vector<std::string> want_urls;
+            for (const auto& u : c.find("images")->as_array()) want_urls.push_back(u.as_string());
+            if (got == want && urls == want_urls) ++ok;
+            else {
+                std::size_t k = 0;
+                while (k < got.size() && k < want.size() && got[k] == want[k]) ++k;
+                check(false, "image case " + std::to_string(n) + (got == want ? ": image order" : " differs at byte " + std::to_string(k) + ": got [" + got.substr(k, 80) +
+                                                                  "] want [" + want.substr(k, 80) + "]"));
+            }
+            ++n;
+            // without an image list the renderer refuses image parts
+            if (!want_urls.empty()) {
+                ChatTemplateInput plain = input;
+                plain.images = nullptr;
+                bool refused = false;
+                try {
+                    (void)render_deepseek_v41_chat(plain);
+                } catch (const ChatTemplateError&) {
+                    refused = true;
+                }
+                check(refused, "image case " + std::to_string(n - 1) + " refused without image support");
+            }
+        }
+        std::cout << "deepseek chat: " << ok << " of " << n << " image cases equal the reference encoder\n";
+        // a literal placeholder in request text is escaped, never an image
+        ChatTemplateInput lit;
+        lit.messages = parse_json(R"([{"role":"user","content":"see <\uff5cdeepseek_image\uff5c> here"}])");
+        std::vector<Json> none;
+        lit.images = &none;
+        const auto rendered = render_deepseek_v41_chat(lit);
+        check(none.empty() && rendered.find("see <|deepseek_image|> here") != std::string::npos, "literal placeholder escaped");
+    }
     // the stable prefix the API hands the engine (ApiService chat: system messages + tools rendered alone): a prefix of
     // every recorded conversation that starts with system messages
     std::size_t prefixes = 0;

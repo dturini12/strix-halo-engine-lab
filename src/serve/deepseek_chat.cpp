@@ -19,56 +19,83 @@ const std::string kUser = "<\xEF\xBD\x9CUser\xEF\xBD\x9C>", kAssistant = "<\xEF\
 const std::string kSystem = "<\xEF\xBD\x9CSystem\xEF\xBD\x9C>", kLatestReminder = "<\xEF\xBD\x9Clatest_reminder\xEF\xBD\x9C>";
 const std::string kEos = "<\xEF\xBD\x9C" "end\xE2\x96\x81" "of\xE2\x96\x81" "sentence\xEF\xBD\x9C>";
 const std::string kCallsBlock = " calls", kInvoke = " invoke", kParameter = " parameter";
+// encoding.py IMAGE_PLACEHOLDER; a literal one in request text is escaped to ASCII bars (the reference refuses it), so
+// every placeholder in the prompt is an image part's.
+const std::string kImage = "<\xEF\xBD\x9C" "deepseek_image" "\xEF\xBD\x9C>", kImageEscaped = "<|deepseek_image|>";
 
 [[noreturn]] void raise(const std::string& message) { throw ChatTemplateError(message); }
 
 std::string str_or(const Json* v, const std::string& fallback = {}) { return v && v->is_string() ? v->as_string() : fallback; }
 
-// One content block of a user turn after merging: text or a tool result (its text).
+std::string escape_images(std::string text) {
+    for (std::size_t at = text.find(kImage); at != std::string::npos; at = text.find(kImage, at + kImageEscaped.size()))
+        text.replace(at, kImage.size(), kImageEscaped);
+    return text;
+}
+
+bool is_image_part(const Json& part) {
+    const auto type = str_or(part.find("type"), "text");
+    return type == "image" || type == "image_url" || type == "input_image" || part.find("image_url") || part.find("image");
+}
+
+// One content block of a user turn after merging: text or a tool result (its text), with the image parts its text
+// references by placeholder, in order.
 struct Block {
     bool tool_result = false;
     std::string text, tool_use_id;
+    std::vector<Json> images;
 };
 struct Message {
     std::string role;
     std::string content;
     bool has_blocks = false;
     std::vector<Block> blocks;
+    std::vector<Json> images;  // system / assistant content parts
     std::string reasoning;
     Json tools;       // array (openai format) or null
     Json tool_calls;  // array (openai format) or null
 };
 
-// Text of a content value: a string, or the concatenated text parts of a list (images are not supported).
-std::string content_text(const Json* content, const char* role) {
+// Text of a content value: a string, or its parts joined by blank lines (encoding.py's "\n\n".join of the text
+// blocks), each image part written as the placeholder and appended to `images` (null: images are refused).
+std::string content_text(const Json* content, const char* role, std::vector<Json>* images) {
     if (!content || content->is_null()) return {};
-    if (content->is_string()) return content->as_string();
+    if (content->is_string()) return escape_images(content->as_string());
     if (!content->is_array()) raise(std::string("Unexpected content type in a ") + role + " message.");
     std::string out;
+    bool first = true;
     for (const auto& part : content->as_array()) {
-        const auto type = str_or(part.find("type"), "text");
-        if (type == "image" || type == "image_url" || part.find("image_url") || part.find("image"))
-            raise("Image input is not supported by this engine.");
+        if (!first) out += "\n\n";
+        first = false;
+        if (is_image_part(part)) {
+            if (!images) raise("Image input is not supported by this engine.");
+            out += kImage;
+            images->push_back(part);
+            continue;
+        }
         const auto* text = part.find("text");
         if (!text || !text->is_string()) raise("Unexpected item type in content.");
-        out += text->as_string();
+        out += escape_images(text->as_string());
     }
     return out;
 }
 
-std::vector<Block> user_blocks(const Json* content) {
+std::vector<Block> user_blocks(const Json* content, bool images_allowed) {
     if (content && content->is_array()) {
         std::vector<Block> out;
         for (const auto& part : content->as_array()) {
+            if (is_image_part(part)) {
+                if (!images_allowed) raise("Image input is not supported by this engine.");
+                out.push_back({false, kImage, {}, {part}});
+                continue;
+            }
             const auto type = str_or(part.find("type"), "text");
-            if (type == "image" || type == "image_url" || part.find("image_url") || part.find("image"))
-                raise("Image input is not supported by this engine.");
             if (type != "text") raise("Unsupported content block type " + type + ".");
-            out.push_back({false, str_or(part.find("text")), {}});
+            out.push_back({false, escape_images(str_or(part.find("text"))), {}, {}});
         }
         return out;
     }
-    return {{false, content_text(content, "user"), {}}};
+    return {{false, content_text(content, "user", nullptr), {}, {}}};
 }
 
 // (namespace, name) of a possibly qualified tool name.
@@ -193,7 +220,9 @@ std::string render_deepseek_v41_chat(const ChatTemplateInput& input) {
         if (!raw.is_object()) raise("Every message must be an object.");
         const auto role = str_or(raw.find("role"));
         if (role == "tool") {
-            Block b{true, content_text(raw.find("content"), "tool"), str_or(raw.find("tool_call_id"))};
+            std::vector<Json> tool_images;
+            Block b{true, content_text(raw.find("content"), "tool", input.images ? &tool_images : nullptr), str_or(raw.find("tool_call_id")), {}};
+            b.images = std::move(tool_images);
             if (!ms.empty() && ms.back().role == "user" && ms.back().has_blocks) ms.back().blocks.push_back(std::move(b));
             else {
                 Message m;
@@ -205,7 +234,7 @@ std::string render_deepseek_v41_chat(const ChatTemplateInput& input) {
             continue;
         }
         if (role == "user") {
-            auto blocks = user_blocks(raw.find("content"));
+            auto blocks = user_blocks(raw.find("content"), input.images != nullptr);
             if (!ms.empty() && ms.back().role == "user" && ms.back().has_blocks) {
                 for (auto& b : blocks) ms.back().blocks.push_back(std::move(b));
             } else {
@@ -220,9 +249,9 @@ std::string render_deepseek_v41_chat(const ChatTemplateInput& input) {
         if (role != "system" && role != "assistant" && role != "developer" && role != "latest_reminder") raise("Unknown role: " + role);
         Message m;
         m.role = role == "developer" ? "system" : role;
-        m.content = content_text(raw.find("content"), role.c_str());
+        m.content = content_text(raw.find("content"), role.c_str(), input.images ? &m.images : nullptr);
         if (role == "assistant") {
-            m.reasoning = str_or(raw.find("reasoning_content"), str_or(raw.find("reasoning")));
+            m.reasoning = escape_images(str_or(raw.find("reasoning_content"), str_or(raw.find("reasoning"))));
             if (const auto* tc = raw.find("tool_calls"); tc && tc->is_array() && tc->size() != 0U) m.tool_calls = *tc;
         }
         if (const auto* t = raw.find("tools"); t && t->is_array() && t->size() != 0U) m.tools = *t;
@@ -303,7 +332,7 @@ std::string render_deepseek_v41_chat(const ChatTemplateInput& input) {
         if (m.role == "system") {
             if (index > 0U) out += kSystem;
             out += m.content;
-            if (m.tools.is_array()) out += "\n\n" + render_tools(tools_for_encoding(m.tools));
+            if (m.tools.is_array()) out += "\n\n" + escape_images(render_tools(tools_for_encoding(m.tools)));
         } else if (m.role == "user") {
             out += kUser + user_text(m);
         } else if (m.role == "latest_reminder") {
@@ -313,7 +342,7 @@ std::string render_deepseek_v41_chat(const ChatTemplateInput& input) {
             if (m.tool_calls.is_array()) {
                 std::string list;
                 for (std::size_t k = 0; k < m.tool_calls.size(); ++k) list += (k ? "\n" : "") + call_to_dsml(m.tool_calls.as_array()[k]);
-                calls = "\n\n<" + kDsml + kCallsBlock + ">\n" + list + "\n</" + kDsml + kCallsBlock + ">";
+                calls = "\n\n<" + kDsml + kCallsBlock + ">\n" + escape_images(list) + "\n</" + kDsml + kCallsBlock + ">";
             }
             std::string reasoning;
             if (thinking && (!drop_thinking || static_cast<int>(index) > last_user)) reasoning = m.reasoning + kThinkEnd;
@@ -327,6 +356,13 @@ std::string render_deepseek_v41_chat(const ChatTemplateInput& input) {
             else out += kThinkEnd;
         }
         prompt += out;
+    }
+    if (input.images) {  // image parts in prompt order
+        for (const auto& m : ms) {
+            for (const auto& b : m.blocks)
+                for (const auto& im : b.images) input.images->push_back(im);
+            for (const auto& im : m.images) input.images->push_back(im);
+        }
     }
     return prompt;
 }

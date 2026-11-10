@@ -118,6 +118,16 @@ struct GenerationProgress {
 // step with the newly verified tokens (stop tokens included); returning false stops generation.
 enum class CacheRetention : std::uint8_t { server_policy, retain, no_store };
 
+// One picture of a chat prompt: its span in `prompt` (every position carries the model's image token id), the identity
+// of the prepared picture (prefix-cache keys, cross-rank checks), the bytes as received (for ranks that prepare it
+// themselves) and the engine's prepared form (DeepSeek V4.1: deepseek41::vision::PreparedImage).
+struct PromptImage {
+    std::uint32_t start = 0, tokens = 0;
+    std::array<std::uint8_t, 32> digest{};
+    std::shared_ptr<const std::vector<std::uint8_t>> encoded;
+    std::shared_ptr<const void> prepared;
+};
+
 struct GenerationJob {
     std::function<void()> on_admitted; // optional: session preflight passed, before execution
     std::function<void(GenerationProgress)> on_progress; // optional, host-only completed prefill units
@@ -128,6 +138,7 @@ struct GenerationJob {
     // chat requests: the prompt's first tokens that render the system prompt and the tools (a prefix every turn of the
     // conversation, and often other conversations, repeat: a prefix cache may snapshot there); 0: none known
     std::uint32_t stable_prefix = 0;
+    std::vector<PromptImage> images;  // pictures in the prompt, in order (chat routes with image input)
     std::uint32_t max_tokens = 256;
     std::vector<std::uint32_t> stop_tokens;
     SamplingParameters sampling;
