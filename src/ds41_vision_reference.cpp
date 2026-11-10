@@ -15,6 +15,21 @@
 namespace strix::deepseek41::vision {
 namespace {
 
+constexpr std::size_t kKeyBlock = kVisionKeyBlock;
+
+// Sum of one key block's probabilities (unused slots 0): 16 groups of 4 consecutive keys, each ((p0 + p1) + p2) + p3,
+// combined by the butterfly g = g + g[c ^ d] for d = 8, 4, 2, 1 (the device's 16-lane shuffle order).
+float block_sum(const float* p) {
+    float g[16], h[16];
+    for (int c = 0; c < 16; ++c) g[c] = ((p[4 * c] + p[4 * c + 1]) + p[4 * c + 2]) + p[4 * c + 3];
+    for (int d = 8; d != 0; d /= 2) {
+        for (int c = 0; c < 16; ++c) h[c] = g[c] + g[c ^ d];
+        for (int c = 0; c < 16; ++c) g[c] = h[c];
+    }
+    return g[0];
+}
+static_assert(kKeyBlock == 64, "block_sum assumes 64 keys per block");
+
 // Run fn(begin, end) over [0, n) in contiguous chunks on `threads` workers.
 template <class F>
 void parallel_rows(std::size_t n, unsigned threads, F&& fn) {
@@ -65,16 +80,17 @@ void linear(const std::uint16_t* x, std::size_t rows, std::size_t K, const std::
     });
 }
 
-// RMSNorm per row: ss = fma(x, x, ss) ascending, r = 1 / sqrt(ss / D + eps), out = bf16(w * (x * r)).
+// RMSNorm per row: ss = wave-order sum of fma(x, x, lane partial), r = 1 / sqrt(ss / D + eps), out = bf16(w * (x * r)).
 void rms_norm(const std::uint16_t* x, std::size_t rows, std::size_t D, const std::uint16_t* w, float eps, std::uint16_t* out, unsigned threads) {
     parallel_rows(rows, threads, [&](std::size_t b, std::size_t e) {
         for (std::size_t n = b; n < e; ++n) {
             const std::uint16_t* xr = x + n * D;
-            float ss = 0.0F;
+            float part[32] = {};
             for (std::size_t k = 0; k < D; ++k) {
                 const float v = bf16_float(xr[k]);
-                ss = std::fma(v, v, ss);
+                part[k % 32U] = std::fma(v, v, part[k % 32U]);
             }
+            const float ss = wave_sum_host(part);
             const float r = vision_inv_root(ss, static_cast<float>(D), eps);
             for (std::size_t k = 0; k < D; ++k) out[n * D + k] = vision_norm(xr[k], r, w[k]);
         }
@@ -119,43 +135,47 @@ std::vector<std::uint16_t> encode_reference(const VisionWeights& w, const Prepar
                         }
                     }
         });
-        // attention per head: s = fma(q, k) over d ascending, times 0.125; softmax with declared_exp, sum ascending;
-        // o = fma(p, v) over keys ascending; o rounded to BF16
+        // attention per head and query row, keys in blocks of kKeyBlock (online softmax, declared order):
+        //   s_j = (sum_d fma(q[d], k_j[d])) * 0.125;  m' = max(m, max_block s);  a = exp(m - m');  p_j = exp(s_j - m');
+        //   l = l * a;  l = l + block_sum(p);  o = o * a;  for j in the block ascending: o[d] = fma(p_j, v_j[d], o[d]);
+        //   out = bf16(o / l)
         for (std::size_t hh = 0; hh < H; ++hh) {
-            std::vector<float> kt(HD * N), vv(N * HD);
+            std::vector<float> kk(N * HD), vv(N * HD);
             for (std::size_t j = 0; j < N; ++j)
                 for (std::size_t d = 0; d < HD; ++d) {
-                    kt[d * N + j] = bf16_float(qkv[j * 3U * D + D + hh * HD + d]);
+                    kk[j * HD + d] = bf16_float(qkv[j * 3U * D + D + hh * HD + d]);
                     vv[j * HD + d] = bf16_float(qkv[j * 3U * D + 2U * D + hh * HD + d]);
                 }
             parallel_rows(N, threads, [&](std::size_t rb, std::size_t re) {
-                std::vector<float> s(N), q(HD), o(HD);
+                std::vector<float> q(HD), o(HD), sblk(kKeyBlock);
                 for (std::size_t i = rb; i < re; ++i) {
                     for (std::size_t d = 0; d < HD; ++d) q[d] = bf16_float(qkv[i * 3U * D + hh * HD + d]);
-                    std::fill(s.begin(), s.end(), 0.0F);
-                    for (std::size_t d = 0; d < HD; ++d) {
-                        const float a = q[d];
-                        const float* kr = kt.data() + d * N;
-                        for (std::size_t j = 0; j < N; ++j) s[j] = std::fma(a, kr[j], s[j]);
-                    }
-                    float m = -__builtin_huge_valf();
-                    for (std::size_t j = 0; j < N; ++j) {
-                        s[j] = s[j] * 0.125F;
-                        m = std::max(m, s[j]);
-                    }
-                    float sum = 0.0F;
-                    for (std::size_t j = 0; j < N; ++j) {
-                        s[j] = ds41::declared_exp(s[j] - m);
-                        sum = sum + s[j];
-                    }
-                    for (std::size_t j = 0; j < N; ++j) s[j] = s[j] / sum;
+                    float m = -__builtin_huge_valf(), lsum = 0.0F;
                     std::fill(o.begin(), o.end(), 0.0F);
-                    for (std::size_t j = 0; j < N; ++j) {
-                        const float p = s[j];
-                        const float* vr = vv.data() + j * HD;
-                        for (std::size_t d = 0; d < HD; ++d) o[d] = std::fma(p, vr[d], o[d]);
+                    for (std::size_t j0 = 0; j0 < N; j0 += kKeyBlock) {
+                        const std::size_t kn = std::min(kKeyBlock, N - j0);
+                        float mb = -__builtin_huge_valf();
+                        for (std::size_t j = 0; j < kn; ++j) {
+                            const float* kr = kk.data() + (j0 + j) * HD;
+                            float acc = 0.0F;
+                            for (std::size_t d = 0; d < HD; ++d) acc = std::fma(q[d], kr[d], acc);
+                            sblk[j] = acc * 0.125F;
+                            mb = std::max(mb, sblk[j]);
+                        }
+                        const float mn = std::max(m, mb);
+                        const float alpha = ds41::declared_exp(m - mn);
+                        float pblk[kKeyBlock] = {};
+                        for (std::size_t j = 0; j < kn; ++j) pblk[j] = ds41::declared_exp(sblk[j] - mn);
+                        lsum = lsum * alpha;
+                        lsum = lsum + block_sum(pblk);
+                        for (std::size_t d = 0; d < HD; ++d) o[d] = o[d] * alpha;
+                        for (std::size_t j = 0; j < kn; ++j) {
+                            const float* vr = vv.data() + (j0 + j) * HD;
+                            for (std::size_t d = 0; d < HD; ++d) o[d] = std::fma(pblk[j], vr[d], o[d]);
+                        }
+                        m = mn;
                     }
-                    for (std::size_t d = 0; d < HD; ++d) attn[i * D + hh * HD + d] = bf16_round(o[d]);
+                    for (std::size_t d = 0; d < HD; ++d) attn[i * D + hh * HD + d] = bf16_round(o[d] / lsum);
                 }
             });
         }

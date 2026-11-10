@@ -8,6 +8,9 @@
 
 namespace strix::deepseek41::vision {
 
+// Attention keys are taken in blocks of this many (online softmax; docs/models/deepseek-v4.1/vision.md).
+inline constexpr unsigned kVisionKeyBlock = 64;
+
 // Round to BF16, nearest even (torch's .to(torch.bfloat16)); NaN stays a quiet NaN.
 STRIX_DS41_HD inline std::uint16_t bf16_round(float v) {
     std::uint32_t u = __builtin_bit_cast(std::uint32_t, v);
@@ -58,6 +61,19 @@ STRIX_DS41_HD inline float declared_erf(float x) {
         y = 1.0F;
     }
     return negative ? -y : y;
+}
+
+// Wave-order sum (as engine-lab's other device reductions): lane l of 32 holds the ascending sum of its elements
+// l, l + 32, ...; the lanes combine by the butterfly v = v + v[l ^ d] for d = 16, 8, 4, 2, 1. Host form of the
+// butterfly on the 32 lane partials; every lane ends with the same value.
+inline float wave_sum_host(const float* partial) {
+    float p[32], q[32];
+    for (int l = 0; l < 32; ++l) p[l] = partial[l];
+    for (int d = 16; d != 0; d /= 2) {
+        for (int l = 0; l < 32; ++l) q[l] = p[l] + p[l ^ d];
+        for (int l = 0; l < 32; ++l) p[l] = q[l];
+    }
+    return p[0];
 }
 
 // GELU (exact form, torch's CUDA order): (x * 0.5) * (1 + erf(x * sqrt(1/2))).
