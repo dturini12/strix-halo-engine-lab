@@ -13,7 +13,7 @@ Pinned structural source: `ggml-org/ggml@353b63b439f27ab2cc19dac97ab1681ba6d2d08
 - little-endian integers and floats without depending on host endianness;
 - scalar types, strings and nested metadata arrays;
 - limits checked before reserving for metadata, tensors, strings, arrays and depth;
-- hierarchical ASCII keys, unique keys and tensor names;
+- hierarchical ASCII keys (`a-z`, `0-9`, `_`, `-`, dot-separated; `-` appears in llama.cpp-era architecture names such as `deepseek4-vision`), unique keys and tensor names;
 - booleans restricted to 0/1;
 - `general.alignment`, zero padding, dimensions and relative/absolute offsets;
 - rejection of GGML types that are retired or unknown at the pinned revision;

@@ -297,9 +297,10 @@ private:
         bool previous_dot = false;
         for (const char symbol : key) {
             const auto character = static_cast<unsigned char>(symbol);
+            // '-' appears in architecture names written by llama.cpp-era converters (deepseek4-vision.*)
             const bool valid = (character >= 'a' && character <= 'z') ||
                                (character >= '0' && character <= '9') ||
-                               character == '_' || character == '.';
+                               character == '_' || character == '.' || character == '-';
             if (!valid || (character == '.' && previous_dot)) {
                 return false;
             }
