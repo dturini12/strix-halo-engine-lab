@@ -46,6 +46,10 @@ the still-pending FP16 sparse attention in the receipt and in one stderr line. `
 variable or option always wins; `--allow-pending` runs pending options whose code is in the build, for
 benchmarks only, stamped `unqualified`. `--print-effective-config` lists the profile and every option.
 
+**Image input:** with `DeepSeek-V4.1-Flash-1017-vision-BF16.gguf` (the pinned vision tower, 970 MB) next to the model,
+`strix-deepseek41-serve` accepts pictures on its chat routes (`--vision auto|on|off`); a 1920 x 1080 screenshot costs
+3.0 s of tower time and about 970 prompt positions. Contract, arithmetic and measurements: [image input](vision.md).
+
 **RTX + pair:** use the [pipeline stage launch contract](pipeline-stages.md).
 The RTX runs layers 0–21; the pair runs layers 22–39 and the head. Preserve the declared composed
 identity and its assets when comparing references.

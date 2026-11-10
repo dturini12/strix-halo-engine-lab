@@ -1205,3 +1205,17 @@ See [the contract](docs/mtp-native-cli.md#context-copyn-gram-drafter-ctx-copy).
 | X-022 | `STRIX_DS41_OB_SPLIT=K`: the TP o_b exchange in K column chunks overlapping the products and adds | exact; R6 66.14 → 67.37 / 69.14 / 71.17 ms at K = 2 / 4 / 8 | Each extra host-path exchange costs ~21 µs net, more than the overlap hides, and nothing independent runs after attention (the compressor index and the engram read this step). Kept opt-in. |
 | X-023 | tpserve prefill (`STRIX_DS41_PREFILL_EXPERT_TP=1`) instead of the expert-parallel prefill | 1.4 % (1K) to 6.1 % (16K) slower | Not adopted. |
 | X-024 | USB4 driver completion work on a per-CPU high-priority queue (`dma_wq_percpu`) | p99 of a 20 KB exchange 230 µs → 2.9 ms; R6 63.90 → 66.24 ms (+3.7 %); R1 28.39 → 27.31 tok/s | A per-CPU worker on the IRQ's CPU cannot move away from what runs there. Receive polling and IRQ pinning were neutral; the after-idle cost is not in the driver's wake-up chain. Kept off. |
+
+## D-066: DeepSeek V4.1 image input in the pair server (declared tower arithmetic, image keys)
+
+The release's vision tower runs on both ranks with a declared arithmetic (sequential FMA dot products, wave-order
+RMSNorm, an online softmax over 64-key tiles) so that the host reference and the device kernels give the same bits;
+torch's kernels are not reproducible on gfx1151, and the declared form is closer to the FP32 tower than the release's
+BF16 CUDA run (E-052). Pictures enter the engine as image keys (top bit set, from the picture and tower identities)
+instead of the image token id: the reference never reads that id beyond the replaced embedding and the Engram dead
+position, so nothing changes numerically, while every token-keyed structure (prefix cache, sessions, the pair's prompt
+transfer) tells pictures apart without new key paths. Rank 0 sends the encoded bytes and both ranks prepare and encode
+(rank 1 checks the identity), which keeps the pair protocol to one header plus bytes. Decoders are written in-house,
+equal to Pillow, to keep third-party code out. Rejected for now: a fast WMMA tower (not bit-reproducible on the host),
+row transfer from rank 0 (one tower per rank instead of a 10 MB row payload per picture), encoding outside the prefill
+round (needs agreement between ranks on when rows are ready). Contract: [vision.md](../models/deepseek-v4.1/vision.md).

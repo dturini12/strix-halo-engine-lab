@@ -3,6 +3,12 @@
 Current cross-cutting summary: [qualification ledger](qualification-ledger.md).
 The slices below are retained implementation history, not native qualification.
 
+## DeepSeek V4.1 Flash image input (2026-11-09)
+
+- **Pair server:** `strix-deepseek41-serve` accepts pictures (PNG/JPEG, base64) on its chat routes, also in tool
+  results; the release's ViT + aligner runs on both ranks (1.29 GiB each), bit for bit its host reference; 3.0 s per
+  1920 x 1080 picture. Decision D-066, evidence E-052, contract [vision.md](../models/deepseek-v4.1/vision.md).
+
 ## DeepSeek V4.1 Flash on two nodes and with a discrete GPU (2026-10-23)
 
 - **Two Strix Halo nodes over USB4:** DeepSeek V4.1 Flash 1017 (2-bit routed experts, c-u6 dense overlay, trellis

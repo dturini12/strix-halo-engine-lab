@@ -351,7 +351,9 @@ window stream shared by all slots. The calibration replay runs once.
 ### Chat requests
 
 - `messages` with roles `system`, `developer`, `user`, `assistant` and `tool`; string content or text
-  parts. Images and video are rejected.
+  parts. Video is rejected; images are rejected except by servers that set `ApiConfig::image_input` (the DeepSeek V4.1
+  server with its vision tower: base64 `image_url` / `input_image` / Anthropic `image` parts, also inside tool results;
+  [image input](../../models/deepseek-v4.1/vision.md)). `GET /v1/capabilities` reports `image_input` and its limits.
 - `tools` (function tools) are rendered into the system turn the way the model was trained; assistant
   tool calls in the history are rendered from `tool_calls` (string or object `arguments`).
 - Thinking: on by default (the template default). `chat_template_kwargs.enable_thinking: false`
@@ -1007,7 +1009,7 @@ encode|plain|decode FILE` exposes the tokenizer on the command line; MODEL may a
 - The window controller switches (`STRIX_MTP_CONTROLLER=survival`, `STRIX_MTP_ACTIVE_ROWS=1`,
   `STRIX_MTP_DRAFT_VOCAB=2`, the window folds) apply to served requests as on the command line. The draft
   vocabulary is chosen per request from that request's prompt.
-- `n` > 1, images and audio are not supported. Logprobs use the resolved host selection route described above.
+- `n` > 1 and audio are not supported; images only where noted above. Logprobs use the resolved host selection route described above.
 - Plain HTTP/1.1 (keep-alive, chunked responses); put a TLS proxy in front for remote access.
 
 ## Independent-session file route (`--serve-prefix-u32le`)
