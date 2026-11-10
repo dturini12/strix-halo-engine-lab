@@ -13,6 +13,8 @@
 //       [--http-max-connections 64] [--http-responses on|off] [--http-capabilities on|off]
 //       [--http-stream-receipts on|off] [--http-sse-keepalive 10] [--model-id deepseek-v4.1-flash] [--default-max-tokens 1024]
 //       [--default-thinking off|on] (chat mode of requests that set neither enable_thinking nor thinking.type)
+//       [--vision auto|on|off [--vision-file FILE] [--vision-max-images 4] [--vision-image-tokens 4096]]
+//           (image input: the ViT + aligner on both ranks; auto = on when the pinned vision GGUF sits next to the model)
 //       [--connect-timeout 60] [--peer-timeout 60]
 //       [--prefill-path rows|device] [--prefill-rows 4096] [--prefill-min 0]
 //       [--prefix-cache-mb 512] [--prefix-block 256] [--prefix-reserve-mb 8192] [--import-parked 1]
@@ -121,6 +123,9 @@
 #include "strix/deepseek41_serve_observe.hpp"
 #include "strix/deepseek41_serve_sched.hpp"
 #include "strix/ds41_expert_tp.hpp"
+#include "strix/ds41_image_keys.hpp"
+#include "strix/ds41_vision.hpp"
+#include "strix/hip_ds41_vision.hpp"
 #include "strix/ds41_trellis.hpp"
 #include "strix/dist/communicator.hpp"
 #include "strix/dist/gpu_direct.hpp"
@@ -180,6 +185,8 @@ struct Args : strix::deepseek41::ServeCachePolicy {
     std::uint32_t default_max_tokens = 1024;
     bool http_responses = true, http_capabilities = true, http_stream_receipts = true;  // ApiConfig defaults (on)
     bool default_thinking = false;  // --default-thinking: chat mode unless the request enables thinking
+    std::string vision = "auto", vision_file;  // --vision auto|on|off, --vision-file (default: next to the model)
+    std::uint32_t vision_max_images = 4, vision_image_tokens = 4096;  // per request
     double http_sse_progress_interval = 1.0;
     double http_sse_keepalive = 10.0;                                                    // seconds, 0: off
     std::uint32_t import_parked = 1;  // imported states parked in slots at most (POST /admin/import-state)
@@ -331,6 +338,7 @@ struct Control {
     BatchRow extra_rows[BatchForward::extended_max_rows - BatchForward::max_rows]{};
 };
 constexpr std::uint32_t kPrefillTask = 4U, kPrefillAbort = 8U, kPrefillDone = 16U;
+constexpr std::uint32_t kPrefillPictures = 32U;  // prefill command: the prompt's pictures follow the prompt (send_pictures)
 // prefill command, pflags bits 8..31: the request's stable prefix (system prompt + tools) in cache blocks
 constexpr std::uint32_t kPrefillHintShift = 8U;
 constexpr std::uint32_t kTokensPerMessage = 16384U;  // 64 KiB per exchange_host
@@ -408,6 +416,7 @@ std::string dspark_markov_identity(const Args& a) {
     return m.cand ? "|markov cand " + std::to_string(m.C) + " " + std::to_string(m.H) : std::string{};
 }
 
+std::string vision_identity(const Args& a);
 Control hello(const Args& a) {
     Control c;
     c.command = static_cast<std::uint32_t>(Command::hello);
@@ -432,7 +441,8 @@ Control hello(const Args& a) {
     // exchange the same bytes and tags, which no CRC or framing check can tell apart.
     const auto ns = strix::deepseek41::prefix_namespace_from_env(strix::ds41::expert_tp::enabled_from_env()).text;
     c.prefix_ns = fnv(strix::deepseek41::sched::serve_identity_text(
-        ns, a.dspark.empty() ? 0U : std::filesystem::file_size(a.dspark), a.dspark_ranks, a.dspark_window, a.dspark_vocab + dspark_markov_identity(a)));
+        ns, a.dspark.empty() ? 0U : std::filesystem::file_size(a.dspark), a.dspark_ranks, a.dspark_window,
+        a.dspark_vocab + dspark_markov_identity(a) + vision_identity(a)));  // image input: both ranks alike
     // Resource limits occupy previously zero hello fields. OFF keeps the original
     // 512 bytes; defaults sampled on different hosts negotiate a common minimum.
     c.pkey = a.session_ram_bytes;
@@ -474,7 +484,7 @@ std::string hello_mismatch(const Control& mine, const Control& peer) {
         peer.prefix_bytes != mine.prefix_bytes || peer.prefix_disk != mine.prefix_disk || peer.prefix_flags != mine.prefix_flags)
         return "the prefill path or the prefix cache differ between the ranks";
     if (peer.prefix_ns != mine.prefix_ns)
-        return "the serve identities differ between the ranks (weights overlay / trellis / EP map content, EP vs expert TP, or DSpark drafter / ranks / window / vocabulary / STRIX_DS41_DSPARK_MARKOV)";
+        return "the serve identities differ between the ranks (weights overlay / trellis / EP map content, EP vs expert TP, DSpark drafter / ranks / window / vocabulary / STRIX_DS41_DSPARK_MARKOV, or image input --vision*)";
     return {};
 }
 
@@ -508,6 +518,162 @@ private:
     std::atomic<bool> stop_{false}, paused_{false};
     std::thread thread_;
 };
+
+// ---- image input (DeepSeek V4.1 vision, docs/models/deepseek-v4.1/vision.md): the tower on both ranks ----
+namespace vision = strix::deepseek41::vision;
+// Changing the tower's declared arithmetic changes this text: cached states holding pictures then never match.
+constexpr const char* kTowerArithmetic = "ds41-vision-tower-v1 (fma chains ascending, wave-order norms, online softmax 64-key tiles)";
+struct VisionEngine {
+    vision::VisionConfig config;
+    std::string file, file_sha256;
+    std::array<std::uint8_t, 32> tower_id{};  // SHA-256 of the vision file's digest and kTowerArithmetic
+    std::unique_ptr<vision::DeviceTower> tower;
+    std::uint32_t max_images = 4, max_tokens = 4096;
+    double load_seconds = 0.0;
+    // A picture's identity in image keys and on the wire: SHA-256 of tower_id and its prepared digest.
+    [[nodiscard]] std::array<std::uint8_t, 32> picture_id(const std::array<std::uint8_t, 32>& prepared) const {
+        std::array<std::uint8_t, 64> both{};
+        std::copy(tower_id.begin(), tower_id.end(), both.begin());
+        std::copy(prepared.begin(), prepared.end(), both.begin() + 32);
+        return strix::sha256_bytes(std::as_bytes(std::span(both))).bytes;
+    }
+    [[nodiscard]] std::uint64_t device_bytes() const { return tower ? tower->weight_bytes() + tower->work_bytes() + tower->pool_bytes() : 0U; }
+};
+std::string vision_file_of(const Args& a) {
+    if (!a.vision_file.empty()) return a.vision_file;
+    return (std::filesystem::path(a.model).parent_path() / "DeepSeek-V4.1-Flash-1017-vision-BF16.gguf").string();
+}
+// The identity both ranks compare in the hello (empty: image input off).
+std::string vision_identity(const Args& a) {
+    if (a.vision == "off" || !a.device_prefill || !a.hetero_listen.empty()) return {};  // split decode: its FRONT has no image path
+    const auto f = vision_file_of(a);
+    if (a.vision == "auto" && !std::filesystem::exists(f)) return {};
+    return "|vision " + std::to_string(std::filesystem::exists(f) ? std::filesystem::file_size(f) : 0U) + " images " +
+           std::to_string(a.vision_max_images) + " tokens " + std::to_string(a.vision_image_tokens) + " " + kTowerArithmetic;
+}
+// The tower and its span-row pool on this rank's device (null: image input off). Both ranks call it at the same point.
+std::unique_ptr<VisionEngine> make_vision(const Args& a, std::uint32_t rank, const strix::deepseek41::Config& model) {
+    if (vision_identity(a).empty()) {
+        if (a.vision == "on" && !a.device_prefill) throw std::invalid_argument("--vision on needs the device prefill (--prefill-path device)");
+        if (a.vision == "on" && !a.hetero_listen.empty()) throw std::invalid_argument("--vision on is not supported with --hetero-listen");
+        if (a.vision != "off") std::fprintf(stderr, "rank %u: image input off (no %s)\n", rank, vision_file_of(a).c_str());
+        return {};
+    }
+    const auto t0 = Clock::now();
+    auto v = std::make_unique<VisionEngine>();
+    v->file = vision_file_of(a);
+    if (!std::filesystem::exists(v->file)) throw std::invalid_argument("--vision on: no vision file " + v->file);
+    const auto sha = strix::sha256_file_content(v->file);
+    strix::deepseek41::admit_file(strix::deepseek41::PinnedFileKind::vision_bf16, std::filesystem::file_size(v->file), sha);
+    v->file_sha256 = strix::model_content_identity_hex(sha);
+    {
+        const std::string id = v->file_sha256 + " " + kTowerArithmetic;
+        v->tower_id = strix::sha256_bytes(std::as_bytes(std::span(id.data(), id.size()))).bytes;
+    }
+    auto w = vision::load_vision_file(v->file);
+    v->config = w.config;
+    if (w.config.image_token_id != model.image_token_id || w.config.out_dim != model.hidden_size)
+        throw std::runtime_error("vision file: image token or projection width differs from the model's");
+    v->max_images = std::max(1U, a.vision_max_images);
+    v->max_tokens = std::max(a.vision_image_tokens, w.config.max_tokens);  // at least one full-size picture
+    v->tower = std::make_unique<vision::DeviceTower>(w, nullptr, v->max_tokens);
+    v->load_seconds = std::chrono::duration<double>(Clock::now() - t0).count();
+    std::fprintf(stderr, "rank %u: image input on: vision tower %s (sha256 %.12s...), %u blocks; device %.1f MiB (weights %.1f, work %.1f, %u span rows %.1f); "
+                 "up to %u pictures / %u tokens per request; %.1f s\n", rank, v->file.c_str(), v->file_sha256.c_str(), w.config.layers,
+                 static_cast<double>(v->device_bytes()) / 1048576.0, static_cast<double>(v->tower->weight_bytes()) / 1048576.0,
+                 static_cast<double>(v->tower->work_bytes()) / 1048576.0, v->max_tokens, static_cast<double>(v->tower->pool_bytes()) / 1048576.0,
+                 v->max_images, v->max_tokens, v->load_seconds);
+    return v;
+}
+
+// A picture of a prefill on this rank: its span in the prompt, its identity (picture_id) and its prepared patches.
+struct PrefillPicture {
+    std::uint32_t start = 0, tokens = 0;
+    std::array<std::uint8_t, 32> id{};
+    std::shared_ptr<const vision::PreparedImage> prepared;
+    std::shared_ptr<const std::vector<std::uint8_t>> encoded;
+};
+std::vector<PrefillPicture> job_pictures(const serve::GenerationJob& job) {
+    std::vector<PrefillPicture> out;
+    for (const auto& im : job.images)
+        out.push_back({im.start, im.tokens, im.digest, std::static_pointer_cast<const vision::PreparedImage>(im.prepared), im.encoded});
+    return out;
+}
+// The keys of a job's image spans in its prompt (idempotent: a job may come back from the deferred lists).
+void key_job_pictures(serve::GenerationJob& job) {
+    for (const auto& im : job.images) {
+        if (std::uint64_t{im.start} + im.tokens > job.prompt.size()) throw std::runtime_error("image span outside the prompt");
+        if (!strix::ds41::is_image_key(job.prompt[im.start])) strix::ds41::key_image_span(job.prompt, im.start, im.tokens, im.digest);
+    }
+}
+// The pictures of a prefill command, rank 0 -> rank 1, after the prompt: a header (count; per picture span start, span
+// tokens, byte count, identity), then the bytes in messages of kImportChunk. Rank 1 prepares every picture itself and
+// checks its identity against rank 0's (a difference poisons the pair: the ranks would compute different rows).
+struct PictureHeader {
+    std::uint32_t start = 0, tokens = 0;
+    std::uint64_t bytes = 0;
+    std::array<std::uint8_t, 32> id{};
+};
+void transfer_state(BatchForward& fwd, std::span<const std::uint8_t> out, std::vector<std::uint8_t>* in);
+std::vector<PrefillPicture> send_pictures(BatchForward& fwd, std::uint32_t rank, const VisionEngine* v, const std::vector<PrefillPicture>* mine) {
+    constexpr std::size_t kMsg = std::size_t{64} << 10U;
+    constexpr std::size_t kMax = (kMsg - 8U) / sizeof(PictureHeader);
+    std::vector<std::byte> o(kMsg), i(kMsg);
+    if (mine) {
+        if (mine->size() > kMax) throw std::runtime_error("too many pictures in one prefill");
+        const std::uint64_t n = mine->size();
+        std::memcpy(o.data(), &n, 8);
+        for (std::size_t k = 0; k < mine->size(); ++k) {
+            const auto& p = (*mine)[k];
+            const PictureHeader h{p.start, p.tokens, p.encoded ? p.encoded->size() : 0U, p.id};
+            std::memcpy(o.data() + 8U + k * sizeof h, &h, sizeof h);
+        }
+    }
+    fwd.exchange_host(o, i);
+    if (mine) {
+        for (const auto& p : *mine) transfer_state(fwd, *p.encoded, nullptr);
+        return *mine;
+    }
+    std::uint64_t n = 0;
+    std::memcpy(&n, i.data(), 8);
+    if (n > kMax) throw std::runtime_error("control channel: picture count");
+    std::vector<PictureHeader> heads(n);
+    for (std::size_t k = 0; k < n; ++k) std::memcpy(&heads[k], i.data() + 8U + k * sizeof(PictureHeader), sizeof(PictureHeader));
+    std::vector<PrefillPicture> out;
+    for (const auto& h : heads) {
+        if (h.bytes > (std::uint64_t{64} << 20U)) throw std::runtime_error("control channel: picture size");
+        auto bytes = std::make_shared<std::vector<std::uint8_t>>(h.bytes);
+        transfer_state(fwd, {}, bytes.get());
+        out.push_back({h.start, h.tokens, h.id, nullptr, bytes});
+    }
+    if (!v) poisoned(rank, "rank 0 sent pictures but image input is off on this rank");
+    for (auto& p : out) {  // prepared here, outside the rounds of the exchange above
+        auto prep = std::make_shared<vision::PreparedImage>(vision::prepare_bytes(*p.encoded, v->config));
+        if (v->picture_id(prep->digest) != p.id || prep->plan.span_tokens() != p.tokens)
+            poisoned(rank, "a picture prepared on rank 1 differs from rank 0's (identity or span size)");
+        p.prepared = std::move(prep);
+    }
+    return out;
+}
+// The span rows of every picture the prefill still reads (span ending after `resume`), encoded into the pool in order.
+std::vector<strix::deepseek41::DevicePrefill::ImageSpan> encode_pictures(VisionEngine& v, const std::vector<PrefillPicture>& pics,
+                                                                         std::uint32_t resume, double* seconds) {
+    const auto t0 = Clock::now();
+    std::vector<strix::deepseek41::DevicePrefill::ImageSpan> spans;
+    std::size_t at = 0;
+    for (const auto& p : pics) {
+        if (p.start + p.tokens <= resume) continue;  // before the resume point: in the cached state already
+        if (!p.prepared || p.prepared->plan.span_tokens() != p.tokens) throw std::runtime_error("picture not prepared");
+        if (at + p.tokens > v.tower->pool_tokens()) throw std::runtime_error("pictures exceed the span-row pool");
+        std::uint16_t* rows = v.tower->pool() + at * v.config.out_dim;
+        v.tower->encode(*p.prepared, rows);
+        spans.push_back({p.start, p.tokens, rows});
+        at += p.tokens;
+    }
+    v.tower->synchronize();
+    if (seconds) *seconds = std::chrono::duration<double>(Clock::now() - t0).count();
+    return spans;
+}
 
 // ---- the device prefill of a prompt into a request's slot: both ranks run it with the same arguments ----
 std::uint64_t fnv_floats(const std::vector<float>& v) {
@@ -633,6 +799,11 @@ public:
         return ok;
     }
     [[nodiscard]] bool has_cache() const noexcept { return cache_ != nullptr; }
+    // image input: the tower (made before this prefill, so --prefill-rows auto sees its memory)
+    void attach_vision(std::unique_ptr<VisionEngine> v) { vision_ = std::move(v); }
+    [[nodiscard]] VisionEngine* vision() const noexcept { return vision_.get(); }
+    // the image spans of the next prefill (both ranks, before every prefill: an empty list when it has no picture)
+    void set_image_spans(std::vector<strix::deepseek41::DevicePrefill::ImageSpan> spans) { prefill_->set_image_spans(std::move(spans)); }
     void set_moe_chunk_rows(std::uint32_t r) noexcept { moe_chunk_rows_ = r; }
     [[nodiscard]] std::uint64_t weight_bytes() const noexcept { return prefill_->weight_bytes(); }  // loaded (owned) by the prefill
     strix::deepseek41::PrefixLookup lookup(std::span<const std::uint32_t> prompt) {
@@ -964,6 +1135,7 @@ private:
     std::uint64_t export_bytes_ = 0, row_layers_ = 0, planned_splits_ = 0;
     std::unique_ptr<strix::deepseek41::DevicePrefill> prefill_;
     std::unique_ptr<strix::deepseek41::PrefixCache> cache_;
+    std::unique_ptr<VisionEngine> vision_;
     strix::deepseek41::AttentionState loaded_;  // prepare()'s state
     std::uint64_t disk_bytes_ = 0;
     double disk_seconds_ = 0.0;
@@ -1424,6 +1596,11 @@ void follow(const Args& initial, BatchForward& fwd, Watchdog& dog, const Prefill
         if (is_prefill) {  // the prompt, then the same prefill as rank 0 (the cache must give rank 0's hit)
             std::vector<std::uint32_t> prompt(c.plen);
             send_prompt(fwd, {}, &prompt);
+            const auto pictures = (c.pflags & kPrefillPictures) != 0U ? send_pictures(fwd, 1U, prefill->vision(), nullptr) : std::vector<PrefillPicture>{};
+            for (const auto& p : pictures)  // the keys rank 0 put in the prompt are this picture's
+                for (std::uint32_t k = 0; k < p.tokens; ++k)
+                    if (p.start + k >= prompt.size() || prompt[p.start + k] != strix::ds41::image_key(p.id, k))
+                        poisoned(1U, "image keys in the prompt differ from the picture's identity");
             auto hit = prefill->lookup(prompt);
             if (hit.resume != c.presume || hit.shared != c.pshared || hit.key != c.pkey)
                 throw std::runtime_error("prefix cache: rank 1 holds other entries than rank 0 (resume " + std::to_string(hit.resume) + " vs " +
@@ -1443,6 +1620,8 @@ void follow(const Args& initial, BatchForward& fwd, Watchdog& dog, const Prefill
             }
             const bool capture = prefill->has_cache() && hit.resume < c.plen && c.plen >= a.prefix_block;
             const bool insert = capture && prefill->admit(c.plen, (c.pflags & 1U) != 0U);
+            prefill->set_image_spans(pictures.empty() ? std::vector<strix::deepseek41::DevicePrefill::ImageSpan>{}
+                                                      : encode_pictures(*prefill->vision(), pictures, hit.resume, nullptr));
             if ((c.pflags & kPrefillTask) != 0U) {  // interleave: units follow (prefill_unit)
                 if (task) throw std::runtime_error("control channel: a prefill task is already running");
                 task = prefill->begin(c.pslot, prompt, hit, insert, (c.pflags >> kPrefillHintShift) * a.prefix_block);
@@ -1819,6 +1998,22 @@ void lead(const Args& initial, BatchForward& fwd, strix::dist::Communicator& com
     config.model_id = a.model_id;
     config.default_max_tokens = a.default_max_tokens;
     config.default_thinking = a.default_thinking;  // --default-thinking (off: chat mode unless the request enables thinking)
+    if (VisionEngine* v = prefill ? prefill->vision() : nullptr) {  // image input: placeholders become spans of keyed positions
+        serve::ApiConfig::ImageInput in;
+        in.placeholder = "<\xEF\xBD\x9C" "deepseek_image" "\xEF\xBD\x9C>";
+        in.token_id = v->config.image_token_id;
+        in.max_images = v->max_images;
+        in.max_tokens = v->max_tokens;
+        in.prepare = [v](std::span<const std::uint8_t> bytes) {
+            auto prep = std::make_shared<vision::PreparedImage>(vision::prepare_bytes(bytes, v->config));
+            serve::PromptImage out;
+            out.tokens = prep->plan.span_tokens();
+            out.digest = v->picture_id(prep->digest);
+            out.prepared = std::move(prep);
+            return out;
+        };
+        config.image_input = std::move(in);
+    }
     config.sampling_policy = "greedy";
     config.responses = a.http_responses;
     config.capabilities = a.http_capabilities;
@@ -2390,6 +2585,8 @@ void lead(const Args& initial, BatchForward& fwd, strix::dist::Communicator& com
             if (!session_id.empty() && (prompt.size() <= p.position || prompt[p.position] != p.next_token))
                 continue;
             if (prompt.size() < p.position || !std::equal(p.tokens.begin(), p.tokens.end(), prompt.begin())) continue;
+            // the rest of the prompt is read in batch rows, which have no image path: a picture after the state needs the prefill
+            if (std::any_of(prompt.begin() + p.position, prompt.end(), strix::ds41::is_image_key)) continue;
             if (a.pool != 0U && fwd.capacity(p.slot) < std::min<std::uint64_t>(a.context, prompt.size() + std::uint64_t{max_tokens} + 1U)) continue;
             if (best < 0 || p.position > parked[static_cast<std::size_t>(best)].position) best = static_cast<std::ptrdiff_t>(i);
         }
@@ -2471,7 +2668,8 @@ void lead(const Args& initial, BatchForward& fwd, strix::dist::Communicator& com
         // the stable prefix in blocks (only the in-run snapshots use it); rank 1 plans the same snapshot points
         const std::uint32_t stable = a.prefix_inrun ? std::min<std::uint32_t>(r.job.job.stable_prefix, static_cast<std::uint32_t>(prompt.size())) : 0U;
         const std::uint32_t stable_blocks = std::min<std::uint32_t>(stable / a.prefix_block, 0xFFFFFFU);
-        c.pflags = (insert ? 1U : 0U) | (as_task ? kPrefillTask : 0U) | (stable_blocks << kPrefillHintShift);
+        const auto pictures = job_pictures(r.job.job);
+        c.pflags = (insert ? 1U : 0U) | (as_task ? kPrefillTask : 0U) | (pictures.empty() ? 0U : kPrefillPictures) | (stable_blocks << kPrefillHintShift);
         c.snaps = pending_snaps;
         pending_snaps = 0;
         take_commits(c);
@@ -2484,6 +2682,7 @@ void lead(const Args& initial, BatchForward& fwd, strix::dist::Communicator& com
             }
         pending_resets = 0;
         send_prompt(fwd, prompt, nullptr);
+        if (!pictures.empty()) (void)send_pictures(fwd, 0U, prefill->vision(), &pictures);
         dog.pause(true);
         bool disk_failed = false;
         const bool ok = prefill->prepare(prompt, hit);
@@ -2500,6 +2699,13 @@ void lead(const Args& initial, BatchForward& fwd, strix::dist::Communicator& com
         }
         const bool capture = prefill->has_cache() && hit.resume < prompt.size() && prompt.size() >= a.prefix_block;
         insert = capture && prefill->admit(static_cast<std::uint32_t>(prompt.size()), insert);
+        {  // the pictures' span rows (the tower on both ranks; none when the cache holds them), then the prefill
+            double encode_s = 0.0;
+            prefill->set_image_spans(pictures.empty() ? std::vector<strix::deepseek41::DevicePrefill::ImageSpan>{}
+                                                      : encode_pictures(*prefill->vision(), pictures, hit.resume, &encode_s));
+            if (!pictures.empty())
+                std::fprintf(stderr, "prefill slot %u: %zu picture(s), tower %.3f s\n", r.seq.slot, pictures.size(), encode_s);
+        }
         if (as_task) {
             active.emplace();
             active->r = &r;
@@ -2811,6 +3017,7 @@ void lead(const Args& initial, BatchForward& fwd, strix::dist::Communicator& com
     };
     std::deque<Deferred> deferred, admit_ready;
     const auto device_path = [&](const std::vector<std::uint32_t>& prompt) {
+        if (prefill != nullptr && std::any_of(prompt.begin(), prompt.end(), strix::ds41::is_image_key)) return true;  // pictures: always
         return prefill != nullptr && prompt.size() >= std::max(a.prefill_min, kMinRows);
     };
     const auto decide = [&](const std::vector<std::uint32_t>& prompt, double waited) {
@@ -3007,6 +3214,7 @@ void lead(const Args& initial, BatchForward& fwd, strix::dist::Communicator& com
                 auto r = std::make_unique<Running>();
                 r->job = std::move(*job);
                 r->start = taken;
+                key_job_pictures(r->job.job);  // image spans carry their keys from here on (scheduler, cache, rank 1)
                 const auto& prompt = r->job.job.prompt;
                 if (prompt.empty() || prompt.size() + 1U >= a.context) {
                     serve::GenerationStats st;
@@ -3347,9 +3555,11 @@ void run_rank(Args a, std::uint32_t rank, std::unique_ptr<strix::dist::Transport
         std::unique_ptr<SlotPrefill> prefill;
         if (!a.device_prefill) return prefill;
         dog.pause(true);
+        auto vision_engine = make_vision(a, rank, fwd.model().config);  // before the auto rows: they see its memory
         if (a.prefill_rows_auto) a.prefill_rows = auto_prefill_rows(a, fwd, comm, rank);
         const auto before = fwd.device_memory().first;
         prefill = std::make_unique<SlotPrefill>(a, fwd, comm, rank);
+        prefill->attach_vision(std::move(vision_engine));
         std::fprintf(stderr, "rank %u: device prefill of %u-row pieces: device free %.2f GiB lower (scratch estimate %.2f GiB + own weights %.2f GiB)\n", rank, a.prefill_rows,
                      (static_cast<double>(before) - static_cast<double>(fwd.device_memory().first)) / 1073741824.0,
                      static_cast<double>(strix::deepseek41::sched::prefill_piece_bytes(a.prefill_rows, a.context)) / 1073741824.0,
@@ -3510,6 +3720,13 @@ int main(int argc, char** argv) try {
         else if (s == "--http-api-key-file") a.api_key_file = next();
         else if (s == "--http-max-queue") a.max_queue = u32();
         else if (s == "--http-max-connections") a.max_connections = u32();
+        else if (s == "--vision") {
+            a.vision = next();
+            if (a.vision != "auto" && a.vision != "on" && a.vision != "off") throw std::invalid_argument(s + " requires auto|on|off");
+        }
+        else if (s == "--vision-file") a.vision_file = next();
+        else if (s == "--vision-max-images") a.vision_max_images = u32();
+        else if (s == "--vision-image-tokens") a.vision_image_tokens = u32();
         else if (s == "--default-thinking") {
             const auto v = next();
             if (v != "on" && v != "off") throw std::invalid_argument(s + " requires on|off");

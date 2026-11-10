@@ -2125,7 +2125,8 @@ __global__ __launch_bounds__(256) void round_bf16_kernel(float* __restrict__ val
 // hc_stream only).
 __global__ __launch_bounds__(1024) void engram_inject_kernel(float* __restrict__ hc_stream, const float* __restrict__ kv,
                                                              const float* __restrict__ qn, const float* __restrict__ kn, unsigned hidden,
-                                                             float eps, float inv_sqrt_hidden) {
+                                                             float eps, float inv_sqrt_hidden, const std::uint8_t* __restrict__ skip) {
+    if (skip != nullptr && skip[blockIdx.x] != 0U) return;  // an image row takes no Engram contribution (its gate is 0)
     __shared__ float part[3][hc_copies][32];
     __shared__ float gates[hc_copies];
     const unsigned chunks = (hidden + chunk - 1U) / chunk;
@@ -3207,14 +3208,30 @@ bool enqueue_q8_0_a8_dense_prefill(const Q8A8DensePrefillView& v, void* stream) 
 }
 
 void enqueue_engram_inject(float* hc_stream, const float* kv, const float* q_norm, const float* k_norm, std::uint32_t rows,
-                           std::uint32_t hidden, float eps, void* stream) {
+                           std::uint32_t hidden, float eps, void* stream, const std::uint8_t* skip_rows) {
     require(hc_stream && kv && q_norm && k_norm && rows && hidden, "Engram injection view");
     const float inv = static_cast<float>(1.0 / __builtin_sqrt(static_cast<double>(hidden)));
     const unsigned chunks = (hidden + chunk - 1U) / chunk;
     require(chunks * hc_copies <= 32U, "Engram injection hidden size");
     hipLaunchKernelGGL(engram_inject_kernel, dim3(rows), dim3(wave * hc_copies * chunks), 0, as_stream(stream), hc_stream, kv, q_norm,
-                       k_norm, hidden, eps, inv);
+                       k_norm, hidden, eps, inv, skip_rows);
     check(hipGetLastError(), "Engram injection launch");
+}
+
+__global__ __launch_bounds__(256) void image_rows_kernel(float* __restrict__ hc_stream, const std::uint16_t* const* __restrict__ src, unsigned hidden) {
+    const std::uint16_t* row = src[blockIdx.x];
+    if (row == nullptr) return;
+    float* h = hc_stream + static_cast<std::size_t>(blockIdx.x) * hc_copies * hidden;
+    for (unsigned i = threadIdx.x; i < hidden; i += blockDim.x) {
+        const float v = __builtin_bit_cast(float, static_cast<std::uint32_t>(row[i]) << 16U);
+        for (unsigned c = 0; c < hc_copies; ++c) h[c * hidden + i] = v;
+    }
+}
+
+void enqueue_image_rows(float* hc_stream, const std::uint16_t* const* src, std::uint32_t rows, std::uint32_t hidden, void* stream) {
+    require(hc_stream && src && rows && hidden, "image rows view");
+    hipLaunchKernelGGL(image_rows_kernel, dim3(rows), dim3(256), 0, as_stream(stream), hc_stream, src, hidden);
+    check(hipGetLastError(), "image rows launch");
 }
 
 // ---- launch accesses ---------------------------------------------------------------------------

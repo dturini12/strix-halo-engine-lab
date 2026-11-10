@@ -4003,7 +4003,7 @@ if(STRIX_ENABLE_HIP_RUNTIME)
     target_link_libraries(strix-deepseek41-batch PRIVATE strix_ds41_batch_dspark strix_ds41_batch_forward strix_dist)
     strix_target_warnings(strix-deepseek41-batch)
     add_executable(strix-deepseek41-serve apps/deepseek41_serve_main.cpp src/handoff.cpp src/bp_codec.cpp)  # --import-frames
-    target_link_libraries(strix-deepseek41-serve PRIVATE strix_ds41_batch_dspark strix_ds41_batch_forward strix_ds41_device_prefill strix_dist strix_serve strix_core strix_ds41_pipeline strix_ds41_session)
+    target_link_libraries(strix-deepseek41-serve PRIVATE strix_ds41_batch_dspark strix_ds41_batch_forward strix_ds41_device_prefill strix_dist strix_serve strix_core strix_ds41_pipeline strix_ds41_session strix_ds41_vision_hip)
     strix_target_warnings(strix-deepseek41-serve)
     if(BUILD_TESTING)
         add_executable(strix-hip-ds41-layer-tests tests/hip_ds41_layer_tests.hip)

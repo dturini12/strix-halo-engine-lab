@@ -9,6 +9,7 @@
 #include "xport/ds41_adapter.hpp"
 #include <optional>
 #include "strix/ds41_engram.hpp"
+#include "strix/ds41_image_keys.hpp"
 #include "strix/ds41_expert_tp.hpp"
 #include "strix/hip_ds41_expert_tp.hpp"
 #include "strix/ds41_moe.hpp"
@@ -624,7 +625,9 @@ struct DevicePrefill::Impl {
     Dev<float> xdeltas, qdeltas;
     Dev<std::int32_t> xsums, qsums;
     Dev<std::uint32_t> ids;
-    Dev<std::uint8_t> image_rows;
+    Dev<std::uint8_t> image_rows;       // per local row of a run: 1 = an image position (router bias, Engram skip)
+    Dev<std::uint64_t> image_src;       // per local row: its BF16 image row (device address) or 0
+    std::vector<DevicePrefill::ImageSpan> image_spans;  // set_image_spans
     // per chunk of chunk_rows rows
     Dev<float> q, o, o_low;
     Dev<std::int8_t> ocodes, olcodes;
@@ -990,6 +993,7 @@ DevicePrefill::DevicePrefill(const std::filesystem::path& gguf, const PrefillOpt
     m.trace_hash = Dev<std::uint64_t>(T);
     m.image_rows = Dev<std::uint8_t>(T);
     m.image_rows.zero(m.stream);
+    m.image_src = Dev<std::uint64_t>(T);
     m.q = Dev<float>(C * QH);
     m.o = Dev<float>(C * QH);
     m.ocodes = Dev<std::int8_t>(C * QH);
@@ -1522,8 +1526,18 @@ PrefillResult DevicePrefill::run_from(std::span<const std::uint32_t> tokens, std
             throw std::invalid_argument("deepseek41 prefill: snapshot point outside the run or not a multiple of window_rows");
     while (m.snap_rings.size() < m.snap_points.size() * m.options.layers)
         m.snap_rings.emplace_back(std::size_t{AttentionHost::ring_capacity} * attn::kWindowEntryBytes);
-    for (const auto t : tokens)
-        if (t >= c.vocab_size) throw std::invalid_argument("deepseek41 prefill: token outside the vocabulary");
+    const auto image_span_at = [&m](std::uint32_t pos) -> const DevicePrefill::ImageSpan* {
+        for (const auto& sp : m.image_spans)
+            if (pos >= sp.start && pos - sp.start < sp.count) return &sp;
+        return nullptr;
+    };
+    for (std::uint32_t t = 0; t < T; ++t) {
+        if (ds41::is_image_key(tokens[t])) {
+            if (!image_span_at(P0 + t)) throw std::invalid_argument("deepseek41 prefill: an image key outside the image spans");
+        } else if (tokens[t] >= c.vocab_size) {
+            throw std::invalid_argument("deepseek41 prefill: token outside the vocabulary");
+        }
+    }
     const std::uint32_t H = c.hidden_size, hc = c.hc_mult, K = c.num_experts_per_tok, I = c.moe_intermediate_size;
     const std::uint32_t QA = c.q_lora_rank, QH = c.num_attention_heads * c.head_dim, OL = c.o_groups * c.o_lora_rank;
     const std::uint32_t W = m.options.window_rows, C = m.options.chunk_rows, D = attn::kHeadDim;
@@ -1920,9 +1934,27 @@ PrefillResult DevicePrefill::run_from(std::span<const std::uint32_t> tokens, std
 
     Dev<std::uint32_t> run_tokens;  // overlap off: allocated per run
     const std::uint32_t* dtokens = nullptr;
+    bool run_images = false;  // this rank's rows hold image positions
     {
         std::vector<std::uint32_t> local_tokens(Tn);
         for (std::uint32_t l = 0; l < Tn; ++l) local_tokens[l] = tokens[global_row[l]];
+        if (!m.image_spans.empty() && Tn != 0U) {  // image rows: their source rows, flags, and token 0 for the embedding lookup
+            std::vector<std::uint64_t> src(Tn, 0U);
+            std::vector<std::uint8_t> flags(Tn, 0U);
+            for (std::uint32_t l = 0; l < Tn; ++l) {
+                const std::uint32_t pos = P0 + global_row[l];
+                if (const auto* sp = image_span_at(pos)) {
+                    src[l] = reinterpret_cast<std::uint64_t>(sp->rows + std::size_t{pos - sp->start} * H);
+                    flags[l] = 1U;
+                    local_tokens[l] = 0U;
+                    run_images = true;
+                }
+            }
+            if (run_images) {
+                m.image_src.upload(src, st);
+                m.image_rows.upload(flags, st);
+            }
+        }
         if (m.overlap) {
             if (Tn != 0U) m.dtokens.upload(local_tokens, st);
             dtokens = m.dtokens.p;
@@ -2009,6 +2041,7 @@ PrefillResult DevicePrefill::run_from(std::span<const std::uint32_t> tokens, std
         switch (s.op) {
         case Op::embed:
             if (Tn != 0U) ds41::enqueue_embedding(m.devh("token_embd.weight"), dtokens, Tn, H, stream_now(), st);  // row_split: a rank may own no row
+            if (run_images) ds41::enqueue_image_rows(stream_now(), reinterpret_cast<const std::uint16_t* const*>(m.image_src.p), Tn, H, st);
             m.identity_pre = true;
             break;
         case Op::engram: {  // encoder layers only: every row
@@ -2037,7 +2070,7 @@ PrefillResult DevicePrefill::run_from(std::span<const std::uint32_t> tokens, std
                 v.out = m.ekv.p;
                 ds41::enqueue_engram_f16_rows(v, st);
                 ds41::enqueue_engram_inject(stream_now() + std::size_t{r0} * stream_row, m.ekv.p, m.devf(p + "engram_q_norm.weight"),
-                                            m.devf(p + "engram_k_norm.weight"), n, H, 1e-20F, st);
+                                            m.devf(p + "engram_k_norm.weight"), n, H, 1e-20F, st, run_images ? m.image_rows.p + r0 : nullptr);
             }
             for (; engram_cut < engram_most; ++engram_cut) cut(PrefillUnitLevel::finest, s.layer, "engram.pad");
             if (!m.overlap) check(hipStreamSynchronize(st), "engram");  // overlap: pinned rows, alive until the run's end
@@ -2764,7 +2797,7 @@ PrefillResult DevicePrefill::run_from(std::span<const std::uint32_t> tokens, std
             v.weight = m.devf(s.weights[0]);
             v.bias = m.devf(s.weights[1]);
             v.bias_image = m.devf(s.weights[2]);
-            v.image_rows = m.image_rows.p;
+            v.image_rows = run_images ? m.image_rows.p + o0 : nullptr;  // flags of the router's rows (local rows from o0)
             v.rows = no;
             v.hidden = H;
             v.experts = c.n_routed_experts;
@@ -3195,8 +3228,8 @@ void DevicePrefill::import_state(const AttentionState& s) {
             if (r.ratio == 2U && S.carry_valid && S.carry.size() != L.carry[0].n) fail("carry of layer " + std::to_string(l));
         }
     }
-    for (const auto t : s.tokens)
-        if (t >= m.model.config.vocab_size) fail("token outside the vocabulary");
+    for (const auto t : s.tokens)  // image keys: positions whose KV the state already holds (dead in the Engram history)
+        if (!ds41::is_image_key(t) && t >= m.model.config.vocab_size) fail("token outside the vocabulary");
     m.cancel_broken = true;
     hipStream_t st = m.stream;
     for (std::uint32_t l = 0; l < m.options.layers; ++l) {
@@ -3310,6 +3343,12 @@ AttentionState DevicePrefill::export_state() const {
         }
     }
     return s;
+}
+
+void DevicePrefill::set_image_spans(std::vector<ImageSpan> spans) {
+    for (const auto& sp : spans)
+        if (sp.count == 0U || sp.rows == nullptr) throw std::invalid_argument("deepseek41 prefill: empty image span");
+    impl_->image_spans = std::move(spans);
 }
 
 void DevicePrefill::set_engram_lookahead(std::span<const std::uint32_t> next) {

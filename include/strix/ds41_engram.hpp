@@ -8,9 +8,12 @@
 // is blocked, reads the compressed pad id), products p_s = id_s * multiplier[e][s] in int64, the
 // running XOR r_1 = p_0 ^ p_1, r_2 = r_1 ^ p_2, ...; the (s + 1)-gram's row for head h is
 // r_s % prime[e][s - 1][h] + offset[e][(s - 1) * heads + h], offsets being the running sum of the
-// layer's primes in that order. Columns are ordered n-gram size major, head minor.
+// layer's primes in that order. Columns are ordered n-gram size major, head minor. An image position (its token is
+// an image key, ds41_image_keys.hpp) is dead: it blocks like the start of the sequence, for itself and for every
+// later position whose look-back reaches it (inference/engram.py NgramHashState, DEAD).
 
 #include "strix/deepseek41_model.hpp"
+#include "strix/ds41_image_keys.hpp"
 
 #include <cstdlib>
 #include <atomic>
@@ -43,6 +46,7 @@ private:
     deepseek41::EngramContract contract_;
     std::vector<std::uint64_t> offsets_;  // [layer][column]
     std::uint32_t pad_ = 0;
+    static constexpr std::uint32_t kDead = 0xFFFFFFFFU;  // an image position in history_
     std::vector<std::uint32_t> history_;  // compressed ids
 };
 

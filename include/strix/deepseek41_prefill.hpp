@@ -286,6 +286,16 @@ public:
     // cache, so the next run's read is served from host memory (the same bytes; nothing else changes). A next run with
     // other tokens or boundaries reads what the cache misses as before. STRIX_DS41_ENGRAM_LOOKAHEAD=0: ignored.
     void set_engram_lookahead(std::span<const std::uint32_t> next);
+    // Image spans of the current sequence (DeepSeek V4.1 image input; docs/models/deepseek-v4.1/vision.md): positions
+    // [start, start + count) carry image keys (ds41_image_keys.hpp) and take the BF16 rows rows[0..count) ([count][hidden],
+    // device memory, alive while runs read them) instead of a token embedding; they are routed with the gate's image
+    // bias and take no Engram contribution. They apply to every later run / extend / begin until replaced (an empty
+    // list: none); a run whose rows hold an image key no span covers throws. Both ranks must set the same spans.
+    struct ImageSpan {
+        std::uint32_t start = 0, count = 0;
+        const std::uint16_t* rows = nullptr;
+    };
+    void set_image_spans(std::vector<ImageSpan> spans);
     // The next run (run / extend / begin) is followed by `next_rows` more rows of the same sequence and nobody reads its
     // decode state, logits or seed: its decoder layers then skip their cone (only the first decoder layer's compressed-KV /
     // index-key entries of every row, which the later runs read, are computed). Admitted only for the full layer set with

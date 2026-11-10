@@ -328,6 +328,9 @@ struct DeviceTower::Impl {
     std::uint16_t* weights = nullptr;
     std::size_t weight_bytes = 0, work_bytes = 0;
     std::uint32_t max_n = 0, max_l = 0;
+    bool own_stream = false;
+    std::uint16_t* pool = nullptr;
+    std::uint32_t pool_tokens = 0;
     // work buffers
     std::uint16_t *patches = nullptr, *x = nullptr, *h = nullptr, *qkv = nullptr, *attn = nullptr, *tmp = nullptr, *gu = nullptr, *mid = nullptr;
     std::uint16_t *unf = nullptr, *a1 = nullptr, *rows = nullptr;
@@ -390,10 +393,14 @@ struct DeviceTower::Impl {
     }
 };
 
-DeviceTower::DeviceTower(const VisionWeights& weights, void* stream) : impl_(std::make_unique<Impl>()) {
+DeviceTower::DeviceTower(const VisionWeights& weights, void* stream, std::uint32_t pool_tokens) : impl_(std::make_unique<Impl>()) {
     auto& m = *impl_;
     m.cfg = weights.config;
     m.stream = static_cast<hipStream_t>(stream);
+    if (m.stream == nullptr) {
+        check(hipStreamCreateWithFlags(&m.stream, hipStreamNonBlocking), "hipStreamCreate");
+        m.own_stream = true;
+    }
     m.tensors = weights.tensors;
     if (weights.blob.empty()) throw std::runtime_error("ds41 vision: weights not loaded");
     m.weight_bytes = weights.blob.size() * 2U;
@@ -416,6 +423,10 @@ DeviceTower::DeviceTower(const VisionWeights& weights, void* stream) : impl_(std
     m.unf = m.alloc<std::uint16_t>(L * c.merged_in());
     m.a1 = m.alloc<std::uint16_t>(L * c.out_dim);
     m.rows = m.alloc<std::uint16_t>(L * c.out_dim);
+    if (pool_tokens != 0U) {
+        m.pool_tokens = pool_tokens;
+        check(hipMalloc(reinterpret_cast<void**>(&m.pool), std::size_t{pool_tokens} * c.out_dim * 2U), "hipMalloc pool");
+    }
     m.pinned_bytes = N * c.patch_in() * 2U + 2U * N * (c.head_dim() / 2U) * 4U;
     check(hipHostMalloc(&m.pinned, m.pinned_bytes, hipHostMallocDefault), "hipHostMalloc");
     if (const char* e = std::getenv("STRIX_VISION_PROFILE"); e && *e == '1') {
@@ -431,7 +442,16 @@ DeviceTower::~DeviceTower() {
     for (void* p : impl_->allocations) (void)hipFree(p);
     if (impl_->weights) (void)hipFree(impl_->weights);
     if (impl_->pinned) (void)hipHostFree(impl_->pinned);
+    if (impl_->pool) (void)hipFree(impl_->pool);
+    if (impl_->ev0) (void)hipEventDestroy(impl_->ev0);
+    if (impl_->ev1) (void)hipEventDestroy(impl_->ev1);
+    if (impl_->own_stream && impl_->stream) (void)hipStreamDestroy(impl_->stream);
 }
+
+std::uint16_t* DeviceTower::pool() const noexcept { return impl_->pool; }
+std::uint32_t DeviceTower::pool_tokens() const noexcept { return impl_->pool_tokens; }
+std::size_t DeviceTower::pool_bytes() const noexcept { return std::size_t{impl_->pool_tokens} * impl_->cfg.out_dim * 2U; }
+void DeviceTower::synchronize() { check(hipStreamSynchronize(impl_->stream), "tower sync"); }
 
 std::size_t DeviceTower::weight_bytes() const noexcept { return impl_->weight_bytes; }
 std::size_t DeviceTower::work_bytes() const noexcept { return impl_->work_bytes; }

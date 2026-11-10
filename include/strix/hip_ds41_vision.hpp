@@ -18,8 +18,10 @@ namespace strix::deepseek41::vision {
 
 class DeviceTower {
 public:
-    // Uploads the weights to the current device and allocates the work buffers; `stream` is a hipStream_t.
-    DeviceTower(const VisionWeights& weights, void* stream);
+    // Uploads the weights to the current device and allocates the work buffers; `stream` is a hipStream_t (null: the
+    // tower creates and owns one). pool_tokens > 0: also a device pool of that many span rows (BF16 [pool][out_dim]) for
+    // the callers' encoded pictures.
+    DeviceTower(const VisionWeights& weights, void* stream, std::uint32_t pool_tokens = 0);
     ~DeviceTower();
     DeviceTower(const DeviceTower&) = delete;
     DeviceTower& operator=(const DeviceTower&) = delete;
@@ -27,6 +29,10 @@ public:
     [[nodiscard]] std::size_t weight_bytes() const noexcept;
     [[nodiscard]] std::size_t work_bytes() const noexcept;
     [[nodiscard]] const VisionConfig& config() const noexcept;
+    [[nodiscard]] std::uint16_t* pool() const noexcept;           // the span-row pool (null without one)
+    [[nodiscard]] std::uint32_t pool_tokens() const noexcept;
+    [[nodiscard]] std::size_t pool_bytes() const noexcept;
+    void synchronize();                                           // waits for the tower's stream
 
     // Encodes one picture into its span rows [span_tokens][out_dim] (BF16) at `device_span_rows` (a device pointer
     // with room for span_tokens * out_dim values). Asynchronous on the stream. observer (tests): each step's BF16

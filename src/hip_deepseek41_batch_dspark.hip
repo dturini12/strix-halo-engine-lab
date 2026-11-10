@@ -1,3 +1,4 @@
+#include "strix/ds41_image_keys.hpp"
 #include "strix/deepseek41_batch_dspark.hpp"
 
 #include "strix/ds41_dspark_vocab.hpp"
@@ -522,7 +523,13 @@ const PlannedStep& BatchSpeculator::plan(std::span<BatchSequence* const> seqs, s
             if (!L.backlog.empty()) lookup_catch_up(slot);
             const auto& s = *seqs[dec[k]];
             if (!L.backlog.empty() || L.next_position != std::uint64_t{s.position} + 1U) continue;  // not current
-            const auto m = L.index->longest({}, lookup_min_match, ds::block_size);
+            auto m = L.index->longest({}, lookup_min_match, ds::block_size);
+            // a continuation stops before an image key: a picture's positions are never proposed (BatchForward has no image rows)
+            for (std::uint32_t j = 0; j < m.available; ++j)
+                if (ds41::is_image_key(m.next[j])) {
+                    m.available = j;
+                    break;
+                }
             if (m.length < lookup_min_match || m.available == 0U) continue;
             const auto b = lookup_bucket(m.length);
             if (lookup_log_) {

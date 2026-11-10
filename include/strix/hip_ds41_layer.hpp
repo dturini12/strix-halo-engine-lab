@@ -299,9 +299,13 @@ void enqueue_combine_argmax(const ArgmaxCandidate* a, const ArgmaxCandidate* b, 
                             void* stream);
 // Engram: raw rows (row_count x 264 B) to bfloat16-rounded FP32 values (row_count x 256).
 void enqueue_engram_rows_bf16(const std::uint8_t* rows, std::uint32_t row_count, float* out, void* stream);
-// Gated injection: stream rows x (hc * hidden) updated in place from kv rows x (hidden * (hc + 1)).
+// Gated injection: stream rows x (hc * hidden) updated in place from kv rows x (hidden * (hc + 1)). skip_rows (optional,
+// one byte per row): rows with a non-zero byte are left unchanged (image rows: the reference masks their gate to 0).
 void enqueue_engram_inject(float* hc_stream, const float* kv, const float* q_norm, const float* k_norm, std::uint32_t rows,
-                           std::uint32_t hidden, float eps, void* stream);
+                           std::uint32_t hidden, float eps, void* stream, const std::uint8_t* skip_rows = nullptr);
+// Image rows (DeepSeek V4.1 vision): for each row r with src[r] non-null, the BF16 row src[r][0..hidden) as FP32 into all
+// hc copies of stream row r (the span's ViT/aligner rows replace the token embedding).
+void enqueue_image_rows(float* hc_stream, const std::uint16_t* const* src, std::uint32_t rows, std::uint32_t hidden, void* stream);
 
 // ---- launch accesses ---------------------------------------------------------------------------
 // The device bytes a call may read or write, for launchers that track cache lines across dependent
