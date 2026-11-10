@@ -646,6 +646,17 @@ target_include_directories(strix_image PUBLIC include)
 target_compile_features(strix_image PUBLIC cxx_std_20)
 strix_target_warnings(strix_image)
 
+# DeepSeek V4.1 image input, host side: preprocessing equal to the release's image_processor.py, the vision file
+# and the ViT/aligner host reference (docs/models/deepseek-v4.1/vision.md). Declared arithmetic: no contraction.
+add_library(strix_ds41_vision STATIC src/ds41_vision_prep.cpp)
+target_include_directories(strix_ds41_vision PUBLIC include)
+target_compile_features(strix_ds41_vision PUBLIC cxx_std_20)
+target_link_libraries(strix_ds41_vision PUBLIC strix_image strix_core)
+strix_target_warnings(strix_ds41_vision)
+if(NOT MSVC)
+    target_compile_options(strix_ds41_vision PRIVATE -ffp-contract=off -fno-fast-math)
+endif()
+
 add_library(strix_serve STATIC
     src/serve/json_constraint.cpp
     src/serve/constraint_selection.cpp
@@ -805,6 +816,10 @@ if(BUILD_TESTING)
     target_link_libraries(strix-image-decode-tests PRIVATE strix_image strix_core strix_serve_json)
     strix_target_warnings(strix-image-decode-tests)
     add_test(NAME strix-image-decode-tests COMMAND strix-image-decode-tests ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/image)
+    add_executable(strix-ds41-vision-prep-tests tests/ds41_vision_prep_tests.cpp)
+    target_link_libraries(strix-ds41-vision-prep-tests PRIVATE strix_ds41_vision strix_serve_json)
+    strix_target_warnings(strix-ds41-vision-prep-tests)
+    add_test(NAME strix-ds41-vision-prep-tests COMMAND strix-ds41-vision-prep-tests ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/ds41_vision/prep_cases.json)
     add_executable(strix-serve-api-tests tests/serve_api_tests.cpp)
     target_link_libraries(strix-serve-api-tests PRIVATE strix_serve strix_core)
     strix_target_warnings(strix-serve-api-tests)
